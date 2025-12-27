@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-PORT = int(os.getenv("PORT", 10000))  # Render نیاز به PORT دارد
+PORT = int(os.getenv("PORT", 10000))
 
 # ======================
 # Fake Web Server
@@ -23,7 +23,7 @@ def run_server():
     server.serve_forever()
 
 # ======================
-# Binance Candles (ایمن)
+# Binance Candles
 # ======================
 def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
     try:
@@ -83,8 +83,8 @@ def price_action(candle, direction):
 # ======================
 # Build Signal
 # ======================
-def build_signal(symbol):
-    candles = get_klines(symbol)
+def build_signal(symbol, interval):
+    candles = get_klines(symbol, interval)
     if not candles:
         return None
     structure = market_structure(candles)
@@ -123,39 +123,32 @@ def can_send(symbol):
 # Telegram Command
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    timeframe = "5m"
-    for symbol in ["BTCUSDT", "ETHUSDT"]:
+    symbols = ["BTCUSDT", "ETHUSDT"]
+    timeframes = ["5m", "15m", "30m"]
+
+    for symbol in symbols:
         if not can_send(symbol):
             await update.message.reply_text(f"⛔️ سقف سیگنال امروز {symbol} پر شده")
             continue
-        signal = build_signal(symbol)
-        if not signal:
-            await update.message.reply_text(f"⏸ {symbol}\nفعلاً شرایط ورود مناسب نیست")
-            continue
-        side, entry, sl, tp = signal
-        await update.message.reply_text(
-            f"""
-📊 {symbol}
-🕒 TF: {timeframe}
 
-{'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}
+        msg = f"📊 {symbol}\n"
 
-🎯 Entry: {entry:.2f}
-🛑 Stop Loss: {sl:.2f}
-💰 Take Profit: {tp:.2f}
+        for tf in timeframes:
+            signal = build_signal(symbol, tf)
+            if signal:
+                side, entry, sl, tp = signal
+                msg += f"\n🕒 TF: {tf}\n{'🟢 LONG' if side=='LONG' else '🔴 SHORT'}\n🎯 Entry: {entry:.2f}\n🛑 SL: {sl:.2f}\n💰 TP: {tp:.2f}\n"
+            else:
+                msg += f"\n🕒 TF: {tf}\n⏸ شرایط ورود مناسب نیست\n"
 
-⚠️ ریسک متوسط – فقط تحلیل
-"""
-        )
+        msg += "\n⚠️ ریسک متوسط – فقط تحلیل"
+        await update.message.reply_text(msg)
 
 # ======================
 # Main
 # ======================
 def main():
-    # Run Fake Web Server برای Render
     threading.Thread(target=run_server).start()
-
-    # Run Telegram Bot
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.run_polling()
