@@ -12,7 +12,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 
-
 # ======================
 # Fake Web Server برای Render
 # ======================
@@ -26,13 +25,17 @@ def run_server():
     server = HTTPServer(("0.0.0.0", PORT), SimpleHandler)
     server.serve_forever()
 
-
 # ======================
-# DATA (کندل ها)
+# DATA from MEXC (بدون تحریم)
 # ======================
 def get_klines(symbol="BTCUSDT", interval="5m", limit=200):
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    url = "https://api.mexc.com/api/v3/klines"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit
+    }
+
     r = requests.get(url, params=params, timeout=10)
     data = r.json()
 
@@ -45,26 +48,28 @@ def get_klines(symbol="BTCUSDT", interval="5m", limit=200):
             "close": float(k[4]),
             "volume": float(k[5])
         })
+
     return candles
 
-
 # ======================
-# Price Action
+# Price Action (Market Structure)
 # ======================
 def detect_structure(candles):
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
+    if len(candles) < 2:
+        return "NOT ENOUGH DATA"
 
-    if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
-        return "BULLISH"
-    elif highs[-1] < highs[-2] and lows[-1] < lows[-2]:
-        return "BEARISH"
+    last = candles[-1]
+    prev = candles[-2]
+
+    if last["high"] > prev["high"] and last["low"] > prev["low"]:
+        return "BULLISH STRUCTURE"
+    elif last["high"] < prev["high"] and last["low"] < prev["low"]:
+        return "BEARISH STRUCTURE"
     else:
-        return "RANGE"
-
+        return "RANGE / CONSOLIDATION"
 
 # ======================
-# Risk (حداکثر ۳ سیگنال در روز)
+# Risk Management (۳ سیگنال در روز)
 # ======================
 signals_today = {}
 
@@ -81,48 +86,29 @@ def can_send(symbol):
     signals_today[key] += 1
     return True
 
-
 # ======================
 # Telegram Command
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # BTC
-    symbol = "BTCUSDT"
     timeframe = "5m"
-    candles = get_klines(symbol, timeframe)
-    structure = detect_structure(candles)
 
-    if not can_send(symbol):
-        await update.message.reply_text("⛔️ سقف سیگنال امروز BTC پر شده")
-    else:
-        await update.message.reply_text(
-            f"""
+    for symbol in ["BTCUSDT", "ETHUSDT"]:
+        candles = get_klines(symbol, timeframe)
+        structure = detect_structure(candles)
+
+        if not can_send(symbol):
+            await update.message.reply_text(f"⛔️ سقف سیگنال امروز {symbol} پر شده")
+        else:
+            await update.message.reply_text(
+                f"""
 📊 {symbol}
 🕒 TF: {timeframe}
 📈 Market Structure: {structure}
 
-⚠️ فقط تحلیل – تصمیم با خودته
+⚠️ فقط تحلیل است
+تصمیم ورود یا خروج با خودت
 """
-        )
-
-    # ETH
-    symbol2 = "ETHUSDT"
-    candles2 = get_klines(symbol2, timeframe)
-    structure2 = detect_structure(candles2)
-
-    if not can_send(symbol2):
-        await update.message.reply_text("⛔️ سقف سیگنال امروز ETH پر شده")
-    else:
-        await update.message.reply_text(
-            f"""
-📊 {symbol2}
-🕒 TF: {timeframe}
-📈 Market Structure: {structure2}
-
-⚠️ فقط تحلیل – تصمیم با خودته
-"""
-        )
-
+            )
 
 # ======================
 # Main
@@ -131,7 +117,6 @@ def run_bot():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.run_polling()
-
 
 if __name__ == "__main__":
     threading.Thread(target=run_server).start()
