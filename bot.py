@@ -1,6 +1,8 @@
 import os
 import threading
 import requests
+import numpy as np
+import pandas as pd
 from datetime import date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
@@ -26,7 +28,7 @@ def run_server():
 # ======================
 # Binance Candles
 # ======================
-def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
+def get_klines(symbol="BTCUSDT", interval="5m", limit=200):
     try:
         r = requests.get(
             "https://api.binance.com/api/v3/klines",
@@ -48,6 +50,7 @@ def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
                 "high": float(k[2]),
                 "low": float(k[3]),
                 "close": float(k[4]),
+                "volume": float(k[5])
             })
         except:
             return None
@@ -57,14 +60,43 @@ def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
     return candles
 
 # ======================
-# Market Structure
+# تبدیل به DataFrame برای اندیکاتورها
 # ======================
-def market_structure(candles):
-    if candles[-1]["high"] > candles[-2]["high"] and candles[-1]["low"] > candles[-2]["low"]:
-        return "BULLISH"
-    if candles[-1]["high"] < candles[-2]["high"] and candles[-1]["low"] < candles[-2]["low"]:
-        return "BEARISH"
-    return "RANGE"
+def to_dataframe(candles):
+    df = pd.DataFrame(candles)
+    df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
+    df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    df['MACD'] = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
+    df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    return df
+
+# ======================
+# کندل شناسی ساده
+# ======================
+def candlestick_pattern(candle, prev):
+    # Bullish Engulfing
+    if candle['close'] > candle['open'] and prev['close'] < prev['open'] and candle['close'] > prev['open'] and candle['open'] < prev['close']:
+        return "BULLISH_ENGULFING"
+    # Bearish Engulfing
+    if candle['close'] < candle['open'] and prev['close'] > prev['open'] and candle['close'] < prev['open'] and candle['open'] > prev['close']:
+        return "BEARISH_ENGULFING"
+    # Hammer
+    body = abs(candle['close'] - candle['open'])
+    lower = candle['open'] - candle['low'] if candle['close'] > candle['open'] else candle['close'] - candle['low']
+    upper = candle['high'] - candle['close'] if candle['close'] > candle['open'] else candle['high'] - candle['open']
+    if lower > 2 * body and upper < body:
+        return "HAMMER"
+    # Shooting Star
+    if upper > 2 * body and lower < body:
+        return "SHOOTING_STAR"
+    return None
 
 # ======================
 # Price Action
@@ -94,26 +126,9 @@ def nds_trend(candles):
     return "RANGE"
 
 # ======================
-# اخبار کریپتو
-# ======================
-def check_news(symbol):
-    if not CRYPTOPANIC_API:
-        return False  # بدون API، نادیده گرفته می‌شود
-    try:
-        url = f"https://cryptopanic.com/api/v1/posts/?auth_token={CRYPTOPANIC_API}&currencies={symbol[:3]}"
-        r = requests.get(url, timeout=5).json()
-        for post in r.get("results", []):
-            if post["importance"] == "high" and post["title"]:
-                return True
-    except:
-        return False
-    return False
-
-# ======================
 # Elliott Wave ساده
 # ======================
 def elliott_wave(candles):
-    # بررسی swing آخر ساده
     if candles[-1]["close"] > candles[-2]["close"] and candles[-2]["close"] > candles[-3]["close"]:
         return "BULLISH"
     if candles[-1]["close"] < candles[-2]["close"] and candles[-2]["close"] < candles[-3]["close"]:
@@ -121,30 +136,47 @@ def elliott_wave(candles):
     return "NEUTRAL"
 
 # ======================
-# Build Signal نهایی
+# اخبار کریپتو
+# ======================
+def check_news(symbol):
+    if not CRYPTOPANIC_API:
+        return False
+    try:
+        url = f"https://cryptopanic.com/api/v1/posts/?auth_token={CRYPTOPANIC_API}&currencies={symbol[:3]}"
+        r = requests.get(url, timeout=5).json()
+        for post in r.get("results", []):
+            if post["importance"] == "high":
+                return True
+    except:
+        return False
+    return False
+
+# ======================
+# Build Signal
 # ======================
 def build_signal(symbol, interval):
     candles = get_klines(symbol, interval)
     if not candles:
         return None
-
-    ms = market_structure(candles)
+    df = to_dataframe(candles)
+    ms = "BULLISH" if df['close'].iloc[-1] > df['close'].iloc[-2] else "BEARISH"
     nds = nds_trend(candles)
     wave = elliott_wave(candles)
     news = check_news(symbol)
+    pattern = candlestick_pattern(candles[-1], candles[-2])
 
-    # همه فاکتورها باید هم‌جهت باشند
+    # شرط نهایی: همه فاکتورها هم‌جهت
     if ms == "BULLISH" and nds == "BULLISH" and wave == "BULLISH" and not news and price_action(candles[-1], "LONG"):
         entry = candles[-1]["close"]
         sl = candles[-2]["low"]
         tp = entry + (entry - sl) * 2
-        return "LONG", entry, sl, tp
+        return "LONG", entry, sl, tp, pattern
 
     if ms == "BEARISH" and nds == "BEARISH" and wave == "BEARISH" and not news and price_action(candles[-1], "SHORT"):
         entry = candles[-1]["close"]
         sl = candles[-2]["high"]
         tp = entry - (sl - entry) * 2
-        return "SHORT", entry, sl, tp
+        return "SHORT", entry, sl, tp, pattern
 
     return None
 
@@ -167,26 +199,24 @@ def can_send(symbol):
 # Telegram Command
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbols = ["BTCUSDT", "ETHUSDT"]
+    symbol = "BTCUSDT"
     timeframes = ["5m", "15m", "30m"]
 
-    for symbol in symbols:
-        if not can_send(symbol):
-            await update.message.reply_text(f"⛔️ سقف سیگنال امروز {symbol} پر شده")
-            continue
+    if not can_send(symbol):
+        await update.message.reply_text(f"⛔️ سقف سیگنال امروز {symbol} پر شده")
+        return
 
-        msg = f"📊 {symbol}\n"
+    msg = f"📊 {symbol}\n"
+    for tf in timeframes:
+        signal = build_signal(symbol, tf)
+        if signal:
+            side, entry, sl, tp, pattern = signal
+            msg += f"\n🕒 TF: {tf}\n{'🟢 LONG' if side=='LONG' else '🔴 SHORT'}\n🎯 Entry: {entry:.2f}\n🛑 SL: {sl:.2f}\n💰 TP: {tp:.2f}\n📌 Pattern: {pattern}\n"
+        else:
+            msg += f"\n🕒 TF: {tf}\n⏸ شرایط ورود مناسب نیست یا خبر منفی\n"
 
-        for tf in timeframes:
-            signal = build_signal(symbol, tf)
-            if signal:
-                side, entry, sl, tp = signal
-                msg += f"\n🕒 TF: {tf}\n{'🟢 LONG' if side=='LONG' else '🔴 SHORT'}\n🎯 Entry: {entry:.2f}\n🛑 SL: {sl:.2f}\n💰 TP: {tp:.2f}\n"
-            else:
-                msg += f"\n🕒 TF: {tf}\n⏸ شرایط ورود مناسب نیست یا خبر منفی\n"
-
-        msg += "\n⚠️ ریسک متوسط – فقط تحلیل"
-        await update.message.reply_text(msg)
+    msg += "\n⚠️ ریسک متوسط – فقط تحلیل"
+    await update.message.reply_text(msg)
 
 # ======================
 # Main
