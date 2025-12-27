@@ -1,20 +1,37 @@
 import os
+import threading
 import requests
 from datetime import date
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+PORT = int(os.getenv("PORT", 10000))  # Render نیاز به PORT دارد
 
 # ======================
-# دریافت کندل‌ها (ایمن)
+# Fake Web Server
+# ======================
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+def run_server():
+    server = HTTPServer(("0.0.0.0", PORT), SimpleHandler)
+    server.serve_forever()
+
+# ======================
+# Binance Candles (ایمن)
 # ======================
 def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=10
+        )
         data = r.json()
     except:
         return None
@@ -36,7 +53,6 @@ def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
 
     if len(candles) < 3:
         return None
-
     return candles
 
 # ======================
@@ -55,30 +71,24 @@ def market_structure(candles):
 def price_action(candle, direction):
     body = abs(candle["close"] - candle["open"])
     range_ = candle["high"] - candle["low"]
-
     if range_ <= 0:
         return False
-
     strength = body / range_
-
     if direction == "LONG" and candle["close"] > candle["open"] and strength > 0.6:
         return True
     if direction == "SHORT" and candle["close"] < candle["open"] and strength > 0.6:
         return True
-
     return False
 
 # ======================
-# ساخت سیگنال
+# Build Signal
 # ======================
 def build_signal(symbol):
     candles = get_klines(symbol)
     if not candles:
         return None
-
     structure = market_structure(candles)
-    last = candles[-1]
-    prev = candles[-2]
+    last, prev = candles[-1], candles[-2]
 
     if structure == "BULLISH" and price_action(last, "LONG"):
         entry = last["close"]
@@ -95,20 +105,17 @@ def build_signal(symbol):
     return None
 
 # ======================
-# محدودیت روزانه
+# Limit 3 signals/day
 # ======================
 signals_today = {}
 
 def can_send(symbol):
     today = date.today().isoformat()
     key = f"{symbol}_{today}"
-
     if key not in signals_today:
         signals_today[key] = 0
-
     if signals_today[key] >= 3:
         return False
-
     signals_today[key] += 1
     return True
 
@@ -117,22 +124,15 @@ def can_send(symbol):
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     timeframe = "5m"
-
     for symbol in ["BTCUSDT", "ETHUSDT"]:
         if not can_send(symbol):
             await update.message.reply_text(f"⛔️ سقف سیگنال امروز {symbol} پر شده")
             continue
-
         signal = build_signal(symbol)
-
         if not signal:
-            await update.message.reply_text(
-                f"⏸ {symbol}\nفعلاً شرایط ورود مناسب نیست"
-            )
+            await update.message.reply_text(f"⏸ {symbol}\nفعلاً شرایط ورود مناسب نیست")
             continue
-
         side, entry, sl, tp = signal
-
         await update.message.reply_text(
             f"""
 📊 {symbol}
@@ -152,6 +152,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Main
 # ======================
 def main():
+    # Run Fake Web Server برای Render
+    threading.Thread(target=run_server).start()
+
+    # Run Telegram Bot
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.run_polling()
