@@ -1,8 +1,6 @@
 import os
-import threading
 import requests
 from datetime import date
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -10,32 +8,13 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # تنظیمات
 # ======================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-PORT = int(os.getenv("PORT", 10000))
 
 # ======================
-# Fake Web Server برای Render
+# دریافت کندل‌ها (Binance فقط برای دیتا)
 # ======================
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
-
-def run_server():
-    server = HTTPServer(("0.0.0.0", PORT), SimpleHandler)
-    server.serve_forever()
-
-# ======================
-# DATA from MEXC (بدون تحریم)
-# ======================
-def get_klines(symbol="BTCUSDT", interval="5m", limit=200):
-    url = "https://api.mexc.com/api/v3/klines"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit
-    }
-
+def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
     r = requests.get(url, params=params, timeout=10)
     data = r.json()
 
@@ -45,31 +24,65 @@ def get_klines(symbol="BTCUSDT", interval="5m", limit=200):
             "open": float(k[1]),
             "high": float(k[2]),
             "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5])
+            "close": float(k[4])
         })
-
     return candles
 
 # ======================
-# Price Action (Market Structure)
+# Market Structure
 # ======================
-def detect_structure(candles):
-    if len(candles) < 2:
-        return "NOT ENOUGH DATA"
+def market_structure(candles):
+    if candles[-1]["high"] > candles[-2]["high"] and candles[-1]["low"] > candles[-2]["low"]:
+        return "BULLISH"
+    if candles[-1]["high"] < candles[-2]["high"] and candles[-1]["low"] < candles[-2]["low"]:
+        return "BEARISH"
+    return "RANGE"
+
+# ======================
+# Price Action (کندل تأیید)
+# ======================
+def price_action(candle, direction):
+    body = abs(candle["close"] - candle["open"])
+    range_ = candle["high"] - candle["low"]
+
+    if range_ == 0:
+        return False
+
+    strength = body / range_
+
+    if direction == "LONG" and candle["close"] > candle["open"] and strength > 0.6:
+        return True
+    if direction == "SHORT" and candle["close"] < candle["open"] and strength > 0.6:
+        return True
+
+    return False
+
+# ======================
+# ساخت سیگنال (ریسک متوسط)
+# ======================
+def build_signal(symbol):
+    candles = get_klines(symbol)
+    structure = market_structure(candles)
 
     last = candles[-1]
     prev = candles[-2]
 
-    if last["high"] > prev["high"] and last["low"] > prev["low"]:
-        return "BULLISH STRUCTURE"
-    elif last["high"] < prev["high"] and last["low"] < prev["low"]:
-        return "BEARISH STRUCTURE"
-    else:
-        return "RANGE / CONSOLIDATION"
+    if structure == "BULLISH" and price_action(last, "LONG"):
+        entry = last["close"]
+        sl = prev["low"]
+        tp = entry + (entry - sl) * 2
+        return "LONG", entry, sl, tp
+
+    if structure == "BEARISH" and price_action(last, "SHORT"):
+        entry = last["close"]
+        sl = prev["high"]
+        tp = entry - (sl - entry) * 2
+        return "SHORT", entry, sl, tp
+
+    return None
 
 # ======================
-# Risk Management (۳ سیگنال در روز)
+# کنترل ۳ سیگنال در روز
 # ======================
 signals_today = {}
 
@@ -93,31 +106,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     timeframe = "5m"
 
     for symbol in ["BTCUSDT", "ETHUSDT"]:
-        candles = get_klines(symbol, timeframe)
-        structure = detect_structure(candles)
-
         if not can_send(symbol):
             await update.message.reply_text(f"⛔️ سقف سیگنال امروز {symbol} پر شده")
-        else:
+            continue
+
+        signal = build_signal(symbol)
+
+        if not signal:
             await update.message.reply_text(
-                f"""
+                f"⏸ {symbol}\nفعلاً شرایط ورود مناسب نیست"
+            )
+            continue
+
+        side, entry, sl, tp = signal
+
+        await update.message.reply_text(
+            f"""
 📊 {symbol}
 🕒 TF: {timeframe}
-📈 Market Structure: {structure}
 
-⚠️ فقط تحلیل است
-تصمیم ورود یا خروج با خودت
+{'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}
+
+🎯 Entry: {entry:.2f}
+🛑 Stop Loss: {sl:.2f}
+💰 Take Profit: {tp:.2f}
+
+⚠️ ریسک متوسط – فقط تحلیل
 """
-            )
+        )
 
 # ======================
 # Main
 # ======================
-def run_bot():
+def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.run_polling()
 
 if __name__ == "__main__":
-    threading.Thread(target=run_server).start()
-    run_bot()
+    main()
