@@ -4,28 +4,39 @@ from datetime import date
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ======================
-# تنظیمات
-# ======================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 # ======================
-# دریافت کندل‌ها (Binance فقط برای دیتا)
+# دریافت کندل‌ها (ایمن)
 # ======================
 def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    r = requests.get(url, params=params, timeout=10)
-    data = r.json()
+
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
+    except:
+        return None
+
+    if not isinstance(data, list):
+        return None
 
     candles = []
     for k in data:
-        candles.append({
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4])
-        })
+        try:
+            candles.append({
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+            })
+        except:
+            return None
+
+    if len(candles) < 3:
+        return None
+
     return candles
 
 # ======================
@@ -39,13 +50,13 @@ def market_structure(candles):
     return "RANGE"
 
 # ======================
-# Price Action (کندل تأیید)
+# Price Action
 # ======================
 def price_action(candle, direction):
     body = abs(candle["close"] - candle["open"])
     range_ = candle["high"] - candle["low"]
 
-    if range_ == 0:
+    if range_ <= 0:
         return False
 
     strength = body / range_
@@ -58,12 +69,14 @@ def price_action(candle, direction):
     return False
 
 # ======================
-# ساخت سیگنال (ریسک متوسط)
+# ساخت سیگنال
 # ======================
 def build_signal(symbol):
     candles = get_klines(symbol)
-    structure = market_structure(candles)
+    if not candles:
+        return None
 
+    structure = market_structure(candles)
     last = candles[-1]
     prev = candles[-2]
 
@@ -82,7 +95,7 @@ def build_signal(symbol):
     return None
 
 # ======================
-# کنترل ۳ سیگنال در روز
+# محدودیت روزانه
 # ======================
 signals_today = {}
 
