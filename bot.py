@@ -8,9 +8,10 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
+CRYPTOPANIC_API = os.getenv("CRYPTOPANIC_API")  # اختیاری برای اخبار
 
 # ======================
-# Fake Web Server
+# Fake Web Server برای Render
 # ======================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -81,31 +82,74 @@ def price_action(candle, direction):
     return False
 
 # ======================
-# Build Signal
+# NDS ساده
+# ======================
+def nds_trend(candles):
+    highs = [c["high"] for c in candles[-5:]]
+    lows = [c["low"] for c in candles[-5:]]
+    if sum([highs[i]-highs[i-1] for i in range(1,5)]) > 0 and sum([lows[i]-lows[i-1] for i in range(1,5)]) > 0:
+        return "BULLISH"
+    if sum([highs[i]-highs[i-1] for i in range(1,5)]) < 0 and sum([lows[i]-lows[i-1] for i in range(1,5)]) < 0:
+        return "BEARISH"
+    return "RANGE"
+
+# ======================
+# اخبار کریپتو
+# ======================
+def check_news(symbol):
+    if not CRYPTOPANIC_API:
+        return False  # بدون API، نادیده گرفته می‌شود
+    try:
+        url = f"https://cryptopanic.com/api/v1/posts/?auth_token={CRYPTOPANIC_API}&currencies={symbol[:3]}"
+        r = requests.get(url, timeout=5).json()
+        for post in r.get("results", []):
+            if post["importance"] == "high" and post["title"]:
+                return True
+    except:
+        return False
+    return False
+
+# ======================
+# Elliott Wave ساده
+# ======================
+def elliott_wave(candles):
+    # بررسی swing آخر ساده
+    if candles[-1]["close"] > candles[-2]["close"] and candles[-2]["close"] > candles[-3]["close"]:
+        return "BULLISH"
+    if candles[-1]["close"] < candles[-2]["close"] and candles[-2]["close"] < candles[-3]["close"]:
+        return "BEARISH"
+    return "NEUTRAL"
+
+# ======================
+# Build Signal نهایی
 # ======================
 def build_signal(symbol, interval):
     candles = get_klines(symbol, interval)
     if not candles:
         return None
-    structure = market_structure(candles)
-    last, prev = candles[-1], candles[-2]
 
-    if structure == "BULLISH" and price_action(last, "LONG"):
-        entry = last["close"]
-        sl = prev["low"]
+    ms = market_structure(candles)
+    nds = nds_trend(candles)
+    wave = elliott_wave(candles)
+    news = check_news(symbol)
+
+    # همه فاکتورها باید هم‌جهت باشند
+    if ms == "BULLISH" and nds == "BULLISH" and wave == "BULLISH" and not news and price_action(candles[-1], "LONG"):
+        entry = candles[-1]["close"]
+        sl = candles[-2]["low"]
         tp = entry + (entry - sl) * 2
         return "LONG", entry, sl, tp
 
-    if structure == "BEARISH" and price_action(last, "SHORT"):
-        entry = last["close"]
-        sl = prev["high"]
+    if ms == "BEARISH" and nds == "BEARISH" and wave == "BEARISH" and not news and price_action(candles[-1], "SHORT"):
+        entry = candles[-1]["close"]
+        sl = candles[-2]["high"]
         tp = entry - (sl - entry) * 2
         return "SHORT", entry, sl, tp
 
     return None
 
 # ======================
-# Limit 3 signals/day
+# محدودیت ۳ سیگنال در روز
 # ======================
 signals_today = {}
 
@@ -139,7 +183,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 side, entry, sl, tp = signal
                 msg += f"\n🕒 TF: {tf}\n{'🟢 LONG' if side=='LONG' else '🔴 SHORT'}\n🎯 Entry: {entry:.2f}\n🛑 SL: {sl:.2f}\n💰 TP: {tp:.2f}\n"
             else:
-                msg += f"\n🕒 TF: {tf}\n⏸ شرایط ورود مناسب نیست\n"
+                msg += f"\n🕒 TF: {tf}\n⏸ شرایط ورود مناسب نیست یا خبر منفی\n"
 
         msg += "\n⚠️ ریسک متوسط – فقط تحلیل"
         await update.message.reply_text(msg)
