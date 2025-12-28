@@ -18,10 +18,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is running")
 
-def run_server():
-    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
-
-threading.Thread(target=run_server, daemon=True).start()
+threading.Thread(target=run_server := lambda: HTTPServer(("0.0.0.0", PORT), Handler).serve_forever(), daemon=True).start()
 
 # =========================
 # Config
@@ -30,11 +27,12 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 SYMBOL = "BTC_USDT"
 INTERVAL = "15m"
 LIMIT = 120
-MAX_SIGNALS_PER_DAY = 5  # افزایش کمی سیگنال
+MAX_SIGNALS_PER_DAY = 3
+
 signals_today = {}
 
 # =========================
-# دریافت کندل‌ها (MEXC)
+# Get Candles (MEXC - بدون تحریم)
 # =========================
 def get_klines():
     try:
@@ -43,76 +41,107 @@ def get_klines():
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
-        candles = []
+
+        if "data" not in data or not data["data"]:
+            print("❌ Candle Error: Data empty")
+            return None
+
         klines = data["data"]
-        for i in range(len(klines["time"])):
+        candles = []
+
+        for k in klines:
+            # MEXC API: [time, open, high, low, close, volume]
             candles.append({
-                "open": float(klines["open"][i]),
-                "high": float(klines["high"][i]),
-                "low": float(klines["low"][i]),
-                "close": float(klines["close"][i]),
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
             })
+
         return candles
+
     except Exception as e:
         print("❌ Candle Error:", e)
         return None
 
 # =========================
-# NDS Logic (حساس‌تر)
+# NDS Logic (حساس)
 # =========================
 def compression(candles):
+    if len(candles) < 6:
+        return False
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
     avg_range = sum(ranges) / len(ranges)
     last_range = candles[-1]["high"] - candles[-1]["low"]
-    return last_range < avg_range * 0.85
+    return last_range < avg_range * 0.7
 
 def displacement(candles):
     last = candles[-1]
     prev = candles[-2]
+
     body = abs(last["close"] - last["open"])
     full = last["high"] - last["low"]
     if full == 0:
         return None
+
     strength = body / full
-    if last["close"] > last["open"] and last["close"] > prev["high"] and strength > 0.5:
+
+    if (
+        last["close"] > last["open"]
+        and last["close"] > prev["high"]
+        and strength > 0.55
+    ):
         return "LONG"
-    if last["close"] < last["open"] and last["close"] < prev["low"] and strength > 0.5:
+
+    if (
+        last["close"] < last["open"]
+        and last["close"] < prev["low"]
+        and strength > 0.55
+    ):
         return "SHORT"
+
     return None
 
 # =========================
-# محدودیت سیگنال در روز
+# Signal Limit (۳ در روز)
 # =========================
 def can_send():
     today = date.today().isoformat()
     signals_today.setdefault(today, 0)
+
     if signals_today[today] >= MAX_SIGNALS_PER_DAY:
         return False
+
     signals_today[today] += 1
     return True
 
 # =========================
-# ارسال خودکار سیگنال
+# Auto Signal (JobQueue)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     candles = get_klines()
     if not candles:
         return
+
     if not compression(candles):
         return
+
     side = displacement(candles)
     if not side or not can_send():
         return
+
     last = candles[-1]
     prev = candles[-2]
+
     entry = last["close"]
     sl = prev["low"] if side == "LONG" else prev["high"]
-    tp = entry + (entry - sl) * 1.8 if side == "LONG" else entry - (sl - entry) * 1.8
+    tp = entry + (entry - sl) * 2 if side == "LONG" else entry - (sl - entry) * 2
+
     text = f"""
 🚨 BTC NDS SIGNAL
 
 📍 {side}
-⏱ TF: 15m
+⏱ TF: {INTERVAL}
 
 🎯 Entry: {entry:.2f}
 🛑 SL: {sl:.2f}
@@ -120,10 +149,15 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
 ⚠️ فقط تحلیل – تصمیم با خودته
 """
-    await context.bot.send_message(chat_id=context.bot.id, text=text)
+
+    # ارسال به خود بات (نیاز به ID)
+    await context.bot.send_message(
+        chat_id=context.bot.id,
+        text=text
+    )
 
 # =========================
-# دستورات تلگرام
+# Commands
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -137,19 +171,26 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not candles:
         await update.message.reply_text("❌ خطا در دریافت دیتا")
         return
+
     last = candles[-1]
-    await update.message.reply_text(f"✅ اتصال OK\nBTC Close: {last['close']}")
+    await update.message.reply_text(
+        f"✅ اتصال OK\nBTC Close: {last['close']}"
+    )
 
 # =========================
 # Main
 # =========================
 def main():
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test", test))
 
-    # ارسال سیگنال کمی سریع‌تر (هر ۴ دقیقه)
-    app.job_queue.run_repeating(auto_signal, interval=240, first=15)
+    app.job_queue.run_repeating(
+        auto_signal,
+        interval=300,   # هر ۵ دقیقه
+        first=15
+    )
 
     app.run_polling()
 
