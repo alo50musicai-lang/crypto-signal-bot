@@ -14,7 +14,7 @@ import time
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 
-SYMBOL = "BTCUSDT"
+SYMBOL = "BTC_USDT"
 TF = "15m"
 CHECK_INTERVAL = 60 * 5  # هر 5 دقیقه بررسی کندل
 
@@ -31,10 +31,10 @@ def run_server():
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 # ======================
-# دریافت کندل‌ها با مدیریت خطا
+# دریافت کندل‌ها از MEXC
 # ======================
 def get_klines(limit=120):
-    url = "https://api.binance.com/api/v3/klines"
+    url = "https://www.mexc.com/open/api/v2/market/kline"
     params = {"symbol": SYMBOL, "interval": TF, "limit": limit}
     
     try:
@@ -46,17 +46,17 @@ def get_klines(limit=120):
         return []
 
     candles = []
-    for k in data:
-        try:
+    try:
+        for k in data["data"]:
             candles.append({
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4])
+                "open": float(k["open"]),
+                "high": float(k["high"]),
+                "low": float(k["low"]),
+                "close": float(k["close"])
             })
-        except Exception as e:
-            print("❌ خطا در تبدیل داده کندل:", k, e)
-            continue
+    except Exception as e:
+        print("❌ خطا در پردازش کندل‌ها:", e)
+        return []
 
     return candles
 
