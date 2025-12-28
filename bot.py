@@ -1,5 +1,4 @@
 import os
-import asyncio
 import requests
 from datetime import date
 from telegram import Update
@@ -17,16 +16,12 @@ MAX_SIGNALS_PER_DAY = 3
 signals_today = {}
 
 # =====================
-# GET CANDLES (BINANCE)
+# GET CANDLES
 # =====================
 def get_klines():
     try:
         url = "https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol": SYMBOL,
-            "interval": INTERVAL,
-            "limit": LIMIT
-        }
+        params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": LIMIT}
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
@@ -37,10 +32,9 @@ def get_klines():
                 "open": float(k[1]),
                 "high": float(k[2]),
                 "low": float(k[3]),
-                "close": float(k[4])
+                "close": float(k[4]),
             })
         return candles
-
     except Exception as e:
         print("❌ Candle error:", e)
         return None
@@ -48,11 +42,11 @@ def get_klines():
 # =====================
 # NDS LOGIC
 # =====================
-def is_compression(candles):
-    last = candles[-1]
+def compression(candles):
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
-    avg_range = sum(ranges) / len(ranges)
-    return (last["high"] - last["low"]) < avg_range * 0.75
+    avg = sum(ranges) / len(ranges)
+    last_range = candles[-1]["high"] - candles[-1]["low"]
+    return last_range < avg * 0.7
 
 def displacement(candles):
     last = candles[-1]
@@ -67,10 +61,8 @@ def displacement(candles):
 
     if last["close"] > last["open"] and last["close"] > prev["high"] and strength > 0.55:
         return "LONG"
-
     if last["close"] < last["open"] and last["close"] < prev["low"] and strength > 0.55:
         return "SHORT"
-
     return None
 
 # =====================
@@ -78,35 +70,35 @@ def displacement(candles):
 # =====================
 def can_send():
     today = date.today().isoformat()
-    if today not in signals_today:
-        signals_today[today] = 0
-
+    signals_today.setdefault(today, 0)
     if signals_today[today] >= MAX_SIGNALS_PER_DAY:
         return False
-
     signals_today[today] += 1
     return True
 
 # =====================
-# AUTO SIGNAL LOOP
+# AUTO SIGNAL (JOB)
 # =====================
-async def auto_signal(app: Application):
-    await asyncio.sleep(10)
+async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
+    candles = get_klines()
+    if not candles:
+        return
 
-    while True:
-        candles = get_klines()
-        if candles and is_compression(candles):
-            side = displacement(candles)
+    if not compression(candles):
+        return
 
-            if side and can_send():
-                last = candles[-1]
-                prev = candles[-2]
+    side = displacement(candles)
+    if not side or not can_send():
+        return
 
-                entry = last["close"]
-                sl = prev["low"] if side == "LONG" else prev["high"]
-                tp = entry + (entry - sl) * 2 if side == "LONG" else entry - (sl - entry) * 2
+    last = candles[-1]
+    prev = candles[-2]
 
-                text = f"""
+    entry = last["close"]
+    sl = prev["low"] if side == "LONG" else prev["high"]
+    tp = entry + (entry - sl) * 2 if side == "LONG" else entry - (sl - entry) * 2
+
+    text = f"""
 🚨 NDS SIGNAL – BTC
 
 📍 {side}
@@ -116,43 +108,28 @@ async def auto_signal(app: Application):
 🛑 SL: {sl:.2f}
 💰 TP: {tp:.2f}
 
-⚠️ فقط تحلیل – مسئولیت با خودت
+⚠️ فقط تحلیل – تصمیم با خودته
 """
-                await app.bot.send_message(chat_id=app.bot.id, text=text)
-
-        await asyncio.sleep(300)  # هر 5 دقیقه
+    await context.bot.send_message(chat_id=context.bot.id, text=text)
 
 # =====================
-# TEST COMMAND
+# COMMANDS
 # =====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 ربات NDS فعال شد\n"
+        "سیگنال‌های BTC به‌صورت خودکار ارسال می‌شوند\n"
+        "نیازی به دستور خاصی نیست"
+    )
+
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     candles = get_klines()
     if not candles:
         await update.message.reply_text("❌ خطا در دریافت دیتا")
         return
-
     last = candles[-1]
     await update.message.reply_text(
-        f"""
-✅ اتصال برقرار است
-
-BTCUSDT {INTERVAL}
-
-Open: {last['open']}
-High: {last['high']}
-Low: {last['low']}
-Close: {last['close']}
-"""
-    )
-
-# =====================
-# START
-# =====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 ربات NDS فعال شد!\n"
-        "سیگنال‌های BTC به صورت خودکار ارسال می‌شوند.\n\n"
-        "برای تست دستور /test را بزن."
+        f"✅ اتصال OK\nBTC Close: {last['close']}"
     )
 
 # =====================
@@ -164,7 +141,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test", test))
 
-    app.create_task(auto_signal(app))
+    app.job_queue.run_repeating(auto_signal, interval=300, first=15)
+
     app.run_polling()
 
 if __name__ == "__main__":
