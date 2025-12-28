@@ -27,19 +27,21 @@ threading.Thread(target=run_server, daemon=True).start()
 # Config
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-SYMBOL = "BTC_USDT"
+
+SYMBOL = "BTCUSDT"
 INTERVAL = "15m"
 LIMIT = 120
 MAX_SIGNALS_PER_DAY = 3
 
 signals_today = {}
+CHAT_ID = None   # بعد از /start ست می‌شود
 
 # =========================
-# Get Candles (MEXC - بدون تحریم)
+# Get Candles (MEXC v3 - سالم)
 # =========================
 def get_klines():
     try:
-        url = "https://www.mexc.com/open/api/v2/market/kline"
+        url = "https://api.mexc.com/api/v3/klines"
         params = {
             "symbol": SYMBOL,
             "interval": INTERVAL,
@@ -50,14 +52,12 @@ def get_klines():
         data = r.json()
 
         candles = []
-        klines = data["data"]
-
-        for i in range(len(klines["time"])):
+        for k in data:
             candles.append({
-                "open": float(klines["open"][i]),
-                "high": float(klines["high"][i]),
-                "low": float(klines["low"][i]),
-                "close": float(klines["close"][i]),
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
             })
 
         return candles
@@ -86,24 +86,16 @@ def displacement(candles):
 
     strength = body / full
 
-    if (
-        last["close"] > last["open"]
-        and last["close"] > prev["high"]
-        and strength > 0.55
-    ):
+    if last["close"] > last["open"] and last["close"] > prev["high"] and strength > 0.55:
         return "LONG"
 
-    if (
-        last["close"] < last["open"]
-        and last["close"] < prev["low"]
-        and strength > 0.55
-    ):
+    if last["close"] < last["open"] and last["close"] < prev["low"] and strength > 0.55:
         return "SHORT"
 
     return None
 
 # =========================
-# Signal Limit (۳ در روز)
+# Signal Limit
 # =========================
 def can_send():
     today = date.today().isoformat()
@@ -116,9 +108,13 @@ def can_send():
     return True
 
 # =========================
-# Auto Signal (JobQueue)
+# Auto Signal
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
+    global CHAT_ID
+    if CHAT_ID is None:
+        return
+
     candles = get_klines()
     if not candles:
         return
@@ -150,15 +146,15 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 ⚠️ فقط تحلیل – تصمیم با خودته
 """
 
-    await context.bot.send_message(
-        chat_id=context.bot.id,
-        text=text
-    )
+    await context.bot.send_message(chat_id=CHAT_ID, text=text)
 
 # =========================
 # Commands
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global CHAT_ID
+    CHAT_ID = update.effective_chat.id
+
     await update.message.reply_text(
         "🤖 ربات NDS فعال شد\n"
         "سیگنال‌های BTC به صورت خودکار ارسال می‌شوند\n"
@@ -171,9 +167,8 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ خطا در دریافت دیتا")
         return
 
-    last = candles[-1]
     await update.message.reply_text(
-        f"✅ اتصال OK\nBTC Close: {last['close']}"
+        f"✅ اتصال OK\nBTC Close: {candles[-1]['close']:.2f}"
     )
 
 # =========================
@@ -188,7 +183,7 @@ def main():
     app.job_queue.run_repeating(
         auto_signal,
         interval=300,   # هر ۵ دقیقه
-        first=20
+        first=30
     )
 
     app.run_polling()
