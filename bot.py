@@ -1,193 +1,170 @@
 import os
+import asyncio
 import requests
 from datetime import date
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
-import asyncio
-import time
 
-# ======================
-# تنظیمات
-# ======================
+# =====================
+# CONFIG
+# =====================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-PORT = int(os.getenv("PORT", 10000))
+SYMBOL = "BTCUSDT"
+INTERVAL = "15m"
+LIMIT = 120
+MAX_SIGNALS_PER_DAY = 3
 
-SYMBOL = "BTC_USDT"
-TF = "15m"
-CHECK_INTERVAL = 60 * 5  # هر 5 دقیقه بررسی کندل
+signals_today = {}
 
-# ======================
-# Web Server (برای Render)
-# ======================
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
-
-def run_server():
-    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
-
-# ======================
-# دریافت کندل‌ها از MEXC
-# ======================
-def get_klines(limit=120):
-    url = "https://www.mexc.com/open/api/v2/market/kline"
-    params = {"symbol": SYMBOL, "interval": TF, "limit": limit}
-    
+# =====================
+# GET CANDLES (BINANCE)
+# =====================
+def get_klines():
     try:
+        url = "https://api.binance.com/api/v3/klines"
+        params = {
+            "symbol": SYMBOL,
+            "interval": INTERVAL,
+            "limit": LIMIT
+        }
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
-    except Exception as e:
-        print("❌ خطا در دریافت دیتای کندل:", e)
-        return []
 
-    candles = []
-    try:
-        for k in data["data"]:
+        candles = []
+        for k in data:
             candles.append({
-                "open": float(k["open"]),
-                "high": float(k["high"]),
-                "low": float(k["low"]),
-                "close": float(k["close"])
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4])
             })
+        return candles
+
     except Exception as e:
-        print("❌ خطا در پردازش کندل‌ها:", e)
-        return []
+        print("❌ Candle error:", e)
+        return None
 
-    return candles
-
-# ======================
-# NDS – Compression حساس‌تر
-# ======================
+# =====================
+# NDS LOGIC
+# =====================
 def is_compression(candles):
-    if len(candles) < 6:
-        return False
+    last = candles[-1]
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
     avg_range = sum(ranges) / len(ranges)
-    last_range = candles[-1]["high"] - candles[-1]["low"]
-    return last_range < avg_range * 0.75
+    return (last["high"] - last["low"]) < avg_range * 0.75
 
-# ======================
-# NDS – Displacement حساس‌تر
-# ======================
 def displacement(candles):
-    if len(candles) < 2:
-        return None
     last = candles[-1]
     prev = candles[-2]
 
     body = abs(last["close"] - last["open"])
     full = last["high"] - last["low"]
-
     if full == 0:
         return None
 
     strength = body / full
 
-    if strength < 0.55:
-        return None
-
-    if last["close"] > prev["high"]:
+    if last["close"] > last["open"] and last["close"] > prev["high"] and strength > 0.55:
         return "LONG"
-    if last["close"] < prev["low"]:
+
+    if last["close"] < last["open"] and last["close"] < prev["low"] and strength > 0.55:
         return "SHORT"
 
     return None
 
-# ======================
-# ساخت سیگنال NDS – حساس‌تر
-# ======================
-def nds_signal():
-    candles = get_klines()
-    if not candles:
-        return None
-
-    if not is_compression(candles):
-        return None
-
-    side = displacement(candles)
-    if not side:
-        return None
-
-    last = candles[-1]
-    base = candles[-5:-1]
-
-    if side == "LONG":
-        entry = last["close"]
-        sl = min(c["low"] for c in base)
-        tp = entry + (entry - sl) * 2
-    else:
-        entry = last["close"]
-        sl = max(c["high"] for c in base)
-        tp = entry - (sl - entry) * 2
-
-    return side, entry, sl, tp
-
-# ======================
-# محدودیت ۳ سیگنال در روز
-# ======================
-signals = {}
-
+# =====================
+# SIGNAL LIMIT
+# =====================
 def can_send():
     today = date.today().isoformat()
-    signals.setdefault(today, 0)
-    if signals[today] >= 3:
+    if today not in signals_today:
+        signals_today[today] = 0
+
+    if signals_today[today] >= MAX_SIGNALS_PER_DAY:
         return False
-    signals[today] += 1
+
+    signals_today[today] += 1
     return True
 
-# ======================
-# ارسال خودکار سیگنال به کاربری که استارت زده
-# ======================
-async def send_signal(app: Application, chat_id: int):
-    while True:
-        if can_send():
-            signal = nds_signal()
-            if signal:
-                side, entry, sl, tp = signal
-                try:
-                    await app.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"""
-📊 BTCUSDT – NDS
-🕒 TF: {TF}
+# =====================
+# AUTO SIGNAL LOOP
+# =====================
+async def auto_signal(app: Application):
+    await asyncio.sleep(10)
 
-{'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}
+    while True:
+        candles = get_klines()
+        if candles and is_compression(candles):
+            side = displacement(candles)
+
+            if side and can_send():
+                last = candles[-1]
+                prev = candles[-2]
+
+                entry = last["close"]
+                sl = prev["low"] if side == "LONG" else prev["high"]
+                tp = entry + (entry - sl) * 2 if side == "LONG" else entry - (sl - entry) * 2
+
+                text = f"""
+🚨 NDS SIGNAL – BTC
+
+📍 {side}
+⏱ TF: {INTERVAL}
 
 🎯 Entry: {entry:.2f}
 🛑 SL: {sl:.2f}
 💰 TP: {tp:.2f}
 
-⚠️ فقط تحلیل – تصمیم با خودت
+⚠️ فقط تحلیل – مسئولیت با خودت
 """
-                    )
-                except Exception as e:
-                    print("❌ خطا در ارسال پیام:", e)
-        await asyncio.sleep(CHECK_INTERVAL)
+                await app.bot.send_message(chat_id=app.bot.id, text=text)
 
-# ======================
-# Command /start
-# ======================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
+        await asyncio.sleep(300)  # هر 5 دقیقه
+
+# =====================
+# TEST COMMAND
+# =====================
+async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    candles = get_klines()
+    if not candles:
+        await update.message.reply_text("❌ خطا در دریافت دیتا")
+        return
+
+    last = candles[-1]
     await update.message.reply_text(
-        "🤖 ربات NDS فعال شد!\nسیگنال‌های BTC به صورت خودکار ارسال می‌شوند."
-    )
-    # اجرای حلقه خودکار سیگنال
-    asyncio.create_task(send_signal(context.application, chat_id))
+        f"""
+✅ اتصال برقرار است
 
-# ======================
-# Main
-# ======================
+BTCUSDT {INTERVAL}
+
+Open: {last['open']}
+High: {last['high']}
+Low: {last['low']}
+Close: {last['close']}
+"""
+    )
+
+# =====================
+# START
+# =====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 ربات NDS فعال شد!\n"
+        "سیگنال‌های BTC به صورت خودکار ارسال می‌شوند.\n\n"
+        "برای تست دستور /test را بزن."
+    )
+
+# =====================
+# MAIN
+# =====================
 def main():
     app = Application.builder().token(TOKEN).build()
-    threading.Thread(target=run_server).start()
-    
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("test", test))
+
+    app.create_task(auto_signal(app))
     app.run_polling()
 
 if __name__ == "__main__":
