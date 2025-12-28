@@ -1,196 +1,165 @@
 import os
-import threading
 import requests
 from datetime import date
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
-
-import pandas as pd
+import threading
 
 # ======================
 # تنظیمات
 # ======================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
+
 SYMBOL = "BTCUSDT"
-TIMEFRAMES = ["5m", "15m", "30m"]
+TF = "15m"
 
 # ======================
-# Fake Web Server (Render)
+# Web Server (برای Render)
 # ======================
-class SimpleHandler(BaseHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is running")
 
 def run_server():
-    server = HTTPServer(("0.0.0.0", PORT), SimpleHandler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 # ======================
-# دریافت کندل‌ها (ایمن)
+# دریافت کندل‌ها
 # ======================
-def get_klines(interval, limit=120):
+def get_klines(limit=120):
     url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": SYMBOL, "interval": interval, "limit": limit}
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-        candles = []
-        for k in data:
-            try:
-                candles.append({
-                    "open": float(k[1]),
-                    "high": float(k[2]),
-                    "low": float(k[3]),
-                    "close": float(k[4]),
-                })
-            except:
-                continue
-        return candles
-    except:
-        return []
+    params = {"symbol": SYMBOL, "interval": TF, "limit": limit}
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json()
+
+    candles = []
+    for k in data:
+        candles.append({
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low": float(k[3]),
+            "close": float(k[4])
+        })
+    return candles
 
 # ======================
-# تحلیل‌ها
+# NDS – Compression
 # ======================
-def market_structure(c):
-    if c[-1]["high"] > c[-2]["high"] and c[-1]["low"] > c[-2]["low"]:
-        return "BULLISH"
-    if c[-1]["high"] < c[-2]["high"] and c[-1]["low"] < c[-2]["low"]:
-        return "BEARISH"
-    return "RANGE"
-
-def price_action(candle, side):
-    body = abs(candle["close"] - candle["open"])
-    rng = candle["high"] - candle["low"]
-    if rng == 0:
-        return False
-    power = body / rng
-    if side == "LONG":
-        return candle["close"] > candle["open"] and power > 0.6
-    if side == "SHORT":
-        return candle["close"] < candle["open"] and power > 0.6
-    return False
-
-def indicators(candles, side):
-    df = pd.DataFrame(candles)
-    df["ema9"] = df["close"].ewm(span=9).mean()
-    df["ema21"] = df["close"].ewm(span=21).mean()
-    df["rsi"] = 100 - (100 / (1 + df["close"].diff().clip(lower=0).rolling(14).mean() /
-                                   df["close"].diff().abs().rolling(14).mean()))
-    last = df.iloc[-1]
-    if side == "LONG":
-        return last["ema9"] > last["ema21"] and last["rsi"] > 50
-    if side == "SHORT":
-        return last["ema9"] < last["ema21"] and last["rsi"] < 50
-    return False
+def is_compression(candles):
+    ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
+    avg_range = sum(ranges) / len(ranges)
+    last_range = candles[-1]["high"] - candles[-1]["low"]
+    return last_range < avg_range * 0.6
 
 # ======================
-# محدودیت ۳ سیگنال
+# NDS – Displacement
 # ======================
-signals_today = {}
+def displacement(candles):
+    last = candles[-1]
+    prev = candles[-2]
 
-def can_send():
-    today = date.today().isoformat()
-    if today not in signals_today:
-        signals_today[today] = 0
-    if signals_today[today] >= 3:
-        return False
-    signals_today[today] += 1
-    return True
+    body = abs(last["close"] - last["open"])
+    full = last["high"] - last["low"]
+
+    if full == 0:
+        return None
+
+    strength = body / full
+
+    if strength < 0.7:
+        return None
+
+    if last["close"] > prev["high"]:
+        return "LONG"
+    if last["close"] < prev["low"]:
+        return "SHORT"
+
+    return None
 
 # ======================
 # ساخت سیگنال
 # ======================
-def analyze(interval):
-    candles = get_klines(interval)
-    if len(candles) < 50:
-        return "⛔️ دیتا کافی نیست"
+def nds_signal():
+    candles = get_klines()
 
-    structure = market_structure(candles)
+    if not is_compression(candles):
+        return None
+
+    side = displacement(candles)
+    if not side:
+        return None
+
     last = candles[-1]
-    prev = candles[-2]
+    base = candles[-6:-1]
 
-    if structure == "BULLISH" and price_action(last, "LONG") and indicators(candles, "LONG"):
+    if side == "LONG":
         entry = last["close"]
-        sl = prev["low"]
+        sl = min(c["low"] for c in base)
         tp = entry + (entry - sl) * 2
-        return f"""🟢 LONG BTC
-TF: {interval}
-
-Entry: {entry:.2f}
-SL: {sl:.2f}
-TP: {tp:.2f}
-"""
-
-    if structure == "BEARISH" and price_action(last, "SHORT") and indicators(candles, "SHORT"):
+    else:
         entry = last["close"]
-        sl = prev["high"]
+        sl = max(c["high"] for c in base)
         tp = entry - (sl - entry) * 2
-        return f"""🔴 SHORT BTC
-TF: {interval}
 
-Entry: {entry:.2f}
-SL: {sl:.2f}
-TP: {tp:.2f}
-"""
-
-    return f"⏸ BTC ({interval})\nشرایط ورود مناسب نیست"
+    return side, entry, sl, tp
 
 # ======================
-# منو
+# محدودیت ۳ سیگنال در روز
 # ======================
-def main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("▶️ START", callback_data="start_btn")],
-        [InlineKeyboardButton("🔍 اسکن سریع BTC", callback_data="scan")],
-        [InlineKeyboardButton("📊 تحلیل تایم‌فریم‌ها", callback_data="analysis")],
-        [InlineKeyboardButton("ℹ️ وضعیت امروز", callback_data="status")],
-    ])
+signals = {}
+
+def can_send():
+    today = date.today().isoformat()
+    signals.setdefault(today, 0)
+    if signals[today] >= 3:
+        return False
+    signals[today] += 1
+    return True
 
 # ======================
-# Handlers
+# UI
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("📊 تحلیل NDS بیت‌کوین", callback_data="nds")]]
     await update.message.reply_text(
-        "🤖 ربات تحلیل BTC آماده است",
-        reply_markup=main_menu()
+        "ربات NDS فعال است 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+async def nds_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    if q.data == "start_btn":
-        await q.message.reply_text(
-            "✅ ربات فعال است\nاز منو استفاده کن 👇",
-            reply_markup=main_menu()
-        )
+    if not can_send():
+        await query.message.reply_text("⛔️ سقف ۳ سیگنال امروز پر شده")
+        return
 
-    if q.data == "status":
-        today = date.today().isoformat()
-        used = signals_today.get(today, 0)
-        await q.message.reply_text(f"📊 سیگنال‌های امروز: {used}/3")
+    signal = nds_signal()
 
-    if q.data in ["scan", "analysis"]:
-        if not can_send():
-            await q.message.reply_text("⛔️ سقف ۳ سیگنال امروز پر شده")
-            return
-        for tf in TIMEFRAMES:
-            await q.message.reply_text(analyze(tf))
+    if not signal:
+        await query.message.reply_text("⏸ فعلاً Displacement معتبر نداریم")
+        return
+
+    side, entry, sl, tp = signal
+
+    await query.message.reply_text(
+        f"""
+📊 BTCUSDT – NDS
+🕒 TF: {TF}
+
+{'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}
+
+🎯 Entry: {entry:.2f}
+🛑 SL: {sl:.2f}
+💰 TP: {tp:.2f}
+
+⚠️ فقط تحلیل – تصمیم با خودت
+"""
+    )
 
 # ======================
 # Main
@@ -198,9 +167,9 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(menu_handler))
-    threading.Thread(target=run_server).start()
+    app.add_handler(CallbackQueryHandler(nds_button))
     app.run_polling()
 
 if __name__ == "__main__":
+    threading.Thread(target=run_server).start()
     main()
