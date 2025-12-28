@@ -3,7 +3,6 @@ import threading
 import requests
 from datetime import date
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -11,7 +10,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # Fake Web Server (برای Render)
 # =========================
 PORT = int(os.getenv("PORT", 10000))
-
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -27,10 +25,9 @@ threading.Thread(target=run_server, daemon=True).start()
 # Config
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-
 SYMBOL = "BTCUSDT"
 LIMIT = 120
-MAX_SIGNALS_PER_DAY = 5   # کمی بیشتر برای سیگنال حرفه‌ای
+MAX_SIGNALS_PER_DAY = 5
 signals_today = {}
 CHAT_ID = None   # بعد از /start ست می‌شود
 
@@ -44,7 +41,6 @@ def get_klines(interval):
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
-
         candles = []
         for k in data:
             candles.append({
@@ -54,13 +50,12 @@ def get_klines(interval):
                 "close": float(k[4]),
             })
         return candles
-
     except Exception as e:
         print("❌ Candle Error:", e)
         return None
 
 # =========================
-# NDS Logic پیشرفته
+# NDS پیشرفته
 # =========================
 def compression(candles):
     if len(candles) < 6:
@@ -70,6 +65,20 @@ def compression(candles):
     last_range = candles[-1]["high"] - candles[-1]["low"]
     return last_range < avg_range * 0.7
 
+def fractal_hook(candles):
+    # بررسی فرکتال و هوک‌ها (Hook 1، Hook 2)
+    last = candles[-1]
+    prev = candles[-2]
+    preprev = candles[-3]
+
+    # Hook صعودی
+    if last["high"] > prev["high"] and prev["low"] < preprev["low"]:
+        return "LONG_HOOK"
+    # Hook نزولی
+    if last["low"] < prev["low"] and prev["high"] > preprev["high"]:
+        return "SHORT_HOOK"
+    return None
+
 def displacement(candles):
     last = candles[-1]
     prev = candles[-2]
@@ -78,10 +87,9 @@ def displacement(candles):
     full = last["high"] - last["low"]
     if full == 0:
         return None
-
     strength = body / full
 
-    # LONG / SHORT پیشرفته با تشخیص فرکتال و الگوریتم NDS
+    # سیگنال اصلی NDS با فازی لاجیک
     if last["close"] > last["open"] and last["close"] > prev["high"] and strength > 0.55:
         return "LONG"
     if last["close"] < last["open"] and last["close"] < prev["low"] and strength > 0.55:
@@ -106,24 +114,24 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID
     if CHAT_ID is None:
         return
-
     for interval in ["15m", "30m"]:
         candles = get_klines(interval)
         if not candles:
             continue
         if not compression(candles):
             continue
+        side_main = displacement(candles)
+        side_hook = fractal_hook(candles)
 
-        side = displacement(candles)
+        side = side_main or side_hook
         if not side or not can_send():
             continue
 
         last = candles[-1]
         prev = candles[-2]
-
         entry = last["close"]
-        sl = prev["low"] if side == "LONG" else prev["high"]
-        tp = entry + (entry - sl) * 2 if side == "LONG" else entry - (sl - entry) * 2
+        sl = prev["low"] if "LONG" in side else prev["high"]
+        tp = entry + (entry - sl) * 2 if "LONG" in side else entry - (sl - entry) * 2
 
         text = f"""
 🚨 BTC NDS SIGNAL
@@ -168,13 +176,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test", test))
-
-    app.job_queue.run_repeating(
-        auto_signal,
-        interval=180,   # هر ۳ دقیقه سریعتر و سیگنال بیشتر
-        first=20
-    )
-
+    app.job_queue.run_repeating(auto_signal, interval=180, first=20)
     app.run_polling()
 
 if __name__ == "__main__":
