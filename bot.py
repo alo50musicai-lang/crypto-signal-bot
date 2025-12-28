@@ -1,7 +1,6 @@
 import os
 import threading
 import requests
-import random
 from datetime import date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -41,14 +40,13 @@ def run_server():
     server.serve_forever()
 
 # ======================
-# دریافت کندل‌ها (Safe)
+# دریافت کندل‌ها (ایمن)
 # ======================
 def get_klines(interval, limit=120):
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": SYMBOL, "interval": interval, "limit": limit}
     try:
         r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
         data = r.json()
         candles = []
         for k in data:
@@ -58,7 +56,6 @@ def get_klines(interval, limit=120):
                     "high": float(k[2]),
                     "low": float(k[3]),
                     "close": float(k[4]),
-                    "volume": float(k[5])
                 })
             except:
                 continue
@@ -92,19 +89,14 @@ def indicators(candles, side):
     df = pd.DataFrame(candles)
     df["ema9"] = df["close"].ewm(span=9).mean()
     df["ema21"] = df["close"].ewm(span=21).mean()
-    df["rsi"] = 100 - (100 / (1 + (df["close"].diff().clip(lower=0).rolling(14).mean() /
-                                   df["close"].diff().abs().rolling(14).mean())))
+    df["rsi"] = 100 - (100 / (1 + df["close"].diff().clip(lower=0).rolling(14).mean() /
+                                   df["close"].diff().abs().rolling(14).mean()))
     last = df.iloc[-1]
     if side == "LONG":
         return last["ema9"] > last["ema21"] and last["rsi"] > 50
     if side == "SHORT":
         return last["ema9"] < last["ema21"] and last["rsi"] < 50
     return False
-
-def support_resistance(c):
-    highs = [x["high"] for x in c[-50:]]
-    lows = [x["low"] for x in c[-50:]]
-    return min(lows), max(highs)
 
 # ======================
 # محدودیت ۳ سیگنال
@@ -131,7 +123,6 @@ def analyze(interval):
     structure = market_structure(candles)
     last = candles[-1]
     prev = candles[-2]
-    sup, res = support_resistance(candles)
 
     if structure == "BULLISH" and price_action(last, "LONG") and indicators(candles, "LONG"):
         entry = last["close"]
@@ -143,8 +134,6 @@ TF: {interval}
 Entry: {entry:.2f}
 SL: {sl:.2f}
 TP: {tp:.2f}
-
-Structure: Bullish
 """
 
     if structure == "BEARISH" and price_action(last, "SHORT") and indicators(candles, "SHORT"):
@@ -157,8 +146,6 @@ TF: {interval}
 Entry: {entry:.2f}
 SL: {sl:.2f}
 TP: {tp:.2f}
-
-Structure: Bearish
 """
 
     return f"⏸ BTC ({interval})\nشرایط ورود مناسب نیست"
@@ -168,9 +155,10 @@ Structure: Bearish
 # ======================
 def main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 بررسی بازار BTC", callback_data="scan")],
-        [InlineKeyboardButton("📊 تحلیل 5m / 15m / 30m", callback_data="analysis")],
-        [InlineKeyboardButton("ℹ️ وضعیت امروز", callback_data="status")]
+        [InlineKeyboardButton("▶️ START", callback_data="start_btn")],
+        [InlineKeyboardButton("🔍 اسکن سریع BTC", callback_data="scan")],
+        [InlineKeyboardButton("📊 تحلیل تایم‌فریم‌ها", callback_data="analysis")],
+        [InlineKeyboardButton("ℹ️ وضعیت امروز", callback_data="status")],
     ])
 
 # ======================
@@ -178,13 +166,19 @@ def main_menu():
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 ربات تحلیل BTC فعال است\nانتخاب کن:",
+        "🤖 ربات تحلیل BTC آماده است",
         reply_markup=main_menu()
     )
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
+    if q.data == "start_btn":
+        await q.message.reply_text(
+            "✅ ربات فعال است\nاز منو استفاده کن 👇",
+            reply_markup=main_menu()
+        )
 
     if q.data == "status":
         today = date.today().isoformat()
