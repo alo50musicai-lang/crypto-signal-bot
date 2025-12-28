@@ -1,10 +1,11 @@
 import os
 import requests
 from datetime import date
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
+import time
 
 # ======================
 # تنظیمات
@@ -14,6 +15,7 @@ PORT = int(os.getenv("PORT", 10000))
 
 SYMBOL = "BTCUSDT"
 TF = "15m"
+CHECK_INTERVAL = 60 * 5  # هر 5 دقیقه بررسی کندل
 
 # ======================
 # Web Server (برای Render)
@@ -58,7 +60,7 @@ def get_klines(limit=120):
     return candles
 
 # ======================
-# NDS – Compression
+# NDS – Compression حساس‌تر
 # ======================
 def is_compression(candles):
     if len(candles) < 6:
@@ -66,10 +68,11 @@ def is_compression(candles):
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
     avg_range = sum(ranges) / len(ranges)
     last_range = candles[-1]["high"] - candles[-1]["low"]
-    return last_range < avg_range * 0.6
+    # حساس‌تر
+    return last_range < avg_range * 0.75
 
 # ======================
-# NDS – Displacement
+# NDS – Displacement حساس‌تر
 # ======================
 def displacement(candles):
     if len(candles) < 2:
@@ -85,7 +88,8 @@ def displacement(candles):
 
     strength = body / full
 
-    if strength < 0.7:
+    # حساس‌تر
+    if strength < 0.55:
         return None
 
     if last["close"] > prev["high"]:
@@ -96,7 +100,7 @@ def displacement(candles):
     return None
 
 # ======================
-# ساخت سیگنال NDS
+# ساخت سیگنال NDS – حساس‌تر
 # ======================
 def nds_signal():
     candles = get_klines()
@@ -111,7 +115,8 @@ def nds_signal():
         return None
 
     last = candles[-1]
-    base = candles[-6:-1]
+    # کندل پایه کوتاه‌تر برای حساسیت بیشتر
+    base = candles[-5:-1]
 
     if side == "LONG":
         entry = last["close"]
@@ -138,31 +143,19 @@ def can_send():
     return True
 
 # ======================
-# UI – دکمه استارت
+# ارسال خودکار سیگنال
 # ======================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("📊 تحلیل NDS BTC", callback_data="nds")]]
-    await update.message.reply_text(
-        "ربات NDS فعال است 👇",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def nds_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if not can_send():
-        await query.message.reply_text("⛔️ سقف ۳ سیگنال امروز پر شده")
-        return
-
-    signal = nds_signal()
-    if not signal:
-        await query.message.reply_text("⏸ فعلاً Displacement معتبر نداریم")
-        return
-
-    side, entry, sl, tp = signal
-    await query.message.reply_text(
-        f"""
+async def send_signal(app: Application):
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")  # باید Chat ID خودت را وارد کنی
+    while True:
+        if can_send():
+            signal = nds_signal()
+            if signal:
+                side, entry, sl, tp = signal
+                try:
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"""
 📊 BTCUSDT – NDS
 🕒 TF: {TF}
 
@@ -174,17 +167,22 @@ async def nds_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⚠️ فقط تحلیل – تصمیم با خودت
 """
-    )
+                    )
+                except Exception as e:
+                    print("❌ خطا در ارسال پیام:", e)
+        await asyncio.sleep(CHECK_INTERVAL)
 
 # ======================
 # Main
 # ======================
+import asyncio
+
 def main():
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(nds_button))
-    app.run_polling()
+    threading.Thread(target=run_server).start()
+    
+    # اجرای حلقه ارسال خودکار
+    asyncio.run(send_signal(app))
 
 if __name__ == "__main__":
-    threading.Thread(target=run_server).start()
     main()
