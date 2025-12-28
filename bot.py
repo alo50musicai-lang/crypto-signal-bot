@@ -5,6 +5,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
+import asyncio
 import time
 
 # ======================
@@ -68,7 +69,6 @@ def is_compression(candles):
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
     avg_range = sum(ranges) / len(ranges)
     last_range = candles[-1]["high"] - candles[-1]["low"]
-    # حساس‌تر
     return last_range < avg_range * 0.75
 
 # ======================
@@ -88,7 +88,6 @@ def displacement(candles):
 
     strength = body / full
 
-    # حساس‌تر
     if strength < 0.55:
         return None
 
@@ -115,7 +114,6 @@ def nds_signal():
         return None
 
     last = candles[-1]
-    # کندل پایه کوتاه‌تر برای حساسیت بیشتر
     base = candles[-5:-1]
 
     if side == "LONG":
@@ -143,10 +141,9 @@ def can_send():
     return True
 
 # ======================
-# ارسال خودکار سیگنال
+# ارسال خودکار سیگنال به کاربری که استارت زده
 # ======================
-async def send_signal(app: Application):
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")  # باید Chat ID خودت را وارد کنی
+async def send_signal(app: Application, chat_id: int):
     while True:
         if can_send():
             signal = nds_signal()
@@ -173,16 +170,25 @@ async def send_signal(app: Application):
         await asyncio.sleep(CHECK_INTERVAL)
 
 # ======================
+# Command /start
+# ======================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    await update.message.reply_text(
+        "🤖 ربات NDS فعال شد!\nسیگنال‌های BTC به صورت خودکار ارسال می‌شوند."
+    )
+    # اجرای حلقه خودکار سیگنال
+    asyncio.create_task(send_signal(context.application, chat_id))
+
+# ======================
 # Main
 # ======================
-import asyncio
-
 def main():
     app = Application.builder().token(TOKEN).build()
     threading.Thread(target=run_server).start()
     
-    # اجرای حلقه ارسال خودکار
-    asyncio.run(send_signal(app))
+    app.add_handler(CommandHandler("start", start))
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
