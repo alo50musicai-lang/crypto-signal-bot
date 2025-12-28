@@ -30,13 +30,13 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 SYMBOL = "BTCUSDT"
 LIMIT = 120
-MAX_SIGNALS_PER_DAY = 3
+MAX_SIGNALS_PER_DAY = 5   # افزایش کمی برای سیگنال بیشتر ولی کنترل شده
 
 signals_today = {}
 CHAT_ID = None   # بعد از /start ست می‌شود
 
 # =========================
-# Get Candles (MEXC v3 - سالم)
+# Get Candles (MEXC v3)
 # =========================
 def get_klines(interval):
     try:
@@ -184,8 +184,8 @@ def main():
 
     app.job_queue.run_repeating(
         auto_signal,
-        interval=300,   # هر ۵ دقیقه
-        first=30
+        interval=180,   # هر ۳ دقیقه برای سریعتر و سیگنال بیشتر
+        first=20
     )
 
     app.run_polling()
