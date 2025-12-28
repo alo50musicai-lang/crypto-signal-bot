@@ -28,28 +28,41 @@ def run_server():
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 # ======================
-# دریافت کندل‌ها
+# دریافت کندل‌ها با مدیریت خطا
 # ======================
 def get_klines(limit=120):
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": SYMBOL, "interval": TF, "limit": limit}
-    r = requests.get(url, params=params, timeout=10)
-    data = r.json()
+    
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print("❌ خطا در دریافت دیتای کندل:", e)
+        return []
 
     candles = []
     for k in data:
-        candles.append({
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4])
-        })
+        try:
+            candles.append({
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4])
+            })
+        except Exception as e:
+            print("❌ خطا در تبدیل داده کندل:", k, e)
+            continue
+
     return candles
 
 # ======================
 # NDS – Compression
 # ======================
 def is_compression(candles):
+    if len(candles) < 6:
+        return False
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
     avg_range = sum(ranges) / len(ranges)
     last_range = candles[-1]["high"] - candles[-1]["low"]
@@ -59,6 +72,8 @@ def is_compression(candles):
 # NDS – Displacement
 # ======================
 def displacement(candles):
+    if len(candles) < 2:
+        return None
     last = candles[-1]
     prev = candles[-2]
 
@@ -81,10 +96,12 @@ def displacement(candles):
     return None
 
 # ======================
-# ساخت سیگنال
+# ساخت سیگنال NDS
 # ======================
 def nds_signal():
     candles = get_klines()
+    if not candles:
+        return None
 
     if not is_compression(candles):
         return None
@@ -121,10 +138,10 @@ def can_send():
     return True
 
 # ======================
-# UI
+# UI – دکمه استارت
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("📊 تحلیل NDS بیت‌کوین", callback_data="nds")]]
+    keyboard = [[InlineKeyboardButton("📊 تحلیل NDS BTC", callback_data="nds")]]
     await update.message.reply_text(
         "ربات NDS فعال است 👇",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -139,13 +156,11 @@ async def nds_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     signal = nds_signal()
-
     if not signal:
         await query.message.reply_text("⏸ فعلاً Displacement معتبر نداریم")
         return
 
     side, entry, sl, tp = signal
-
     await query.message.reply_text(
         f"""
 📊 BTCUSDT – NDS
