@@ -29,7 +29,6 @@ threading.Thread(target=run_server, daemon=True).start()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 SYMBOL = "BTCUSDT"
-INTERVAL = "15m"
 LIMIT = 120
 MAX_SIGNALS_PER_DAY = 3
 
@@ -39,12 +38,12 @@ CHAT_ID = None   # بعد از /start ست می‌شود
 # =========================
 # Get Candles (MEXC v3 - سالم)
 # =========================
-def get_klines():
+def get_klines(interval):
     try:
         url = "https://api.mexc.com/api/v3/klines"
         params = {
             "symbol": SYMBOL,
-            "interval": INTERVAL,
+            "interval": interval,
             "limit": LIMIT
         }
         r = requests.get(url, params=params, timeout=10)
@@ -70,6 +69,8 @@ def get_klines():
 # NDS Logic (حساس)
 # =========================
 def compression(candles):
+    if len(candles) < 6:
+        return False
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
     avg_range = sum(ranges) / len(ranges)
     last_range = candles[-1]["high"] - candles[-1]["low"]
@@ -115,29 +116,30 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     if CHAT_ID is None:
         return
 
-    candles = get_klines()
-    if not candles:
-        return
+    for interval in ["15m", "30m"]:
+        candles = get_klines(interval)
+        if not candles:
+            continue
 
-    if not compression(candles):
-        return
+        if not compression(candles):
+            continue
 
-    side = displacement(candles)
-    if not side or not can_send():
-        return
+        side = displacement(candles)
+        if not side or not can_send():
+            continue
 
-    last = candles[-1]
-    prev = candles[-2]
+        last = candles[-1]
+        prev = candles[-2]
 
-    entry = last["close"]
-    sl = prev["low"] if side == "LONG" else prev["high"]
-    tp = entry + (entry - sl) * 2 if side == "LONG" else entry - (sl - entry) * 2
+        entry = last["close"]
+        sl = prev["low"] if side == "LONG" else prev["high"]
+        tp = entry + (entry - sl) * 2 if side == "LONG" else entry - (sl - entry) * 2
 
-    text = f"""
+        text = f"""
 🚨 BTC NDS SIGNAL
 
 📍 {side}
-⏱ TF: 15m
+⏱ TF: {interval}
 
 🎯 Entry: {entry:.2f}
 🛑 SL: {sl:.2f}
@@ -146,7 +148,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 ⚠️ فقط تحلیل – تصمیم با خودته
 """
 
-    await context.bot.send_message(chat_id=CHAT_ID, text=text)
+        await context.bot.send_message(chat_id=CHAT_ID, text=text)
 
 # =========================
 # Commands
@@ -162,14 +164,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    candles = get_klines()
-    if not candles:
-        await update.message.reply_text("❌ خطا در دریافت دیتا")
-        return
-
-    await update.message.reply_text(
-        f"✅ اتصال OK\nBTC Close: {candles[-1]['close']:.2f}"
-    )
+    ok = []
+    for interval in ["15m", "30m"]:
+        candles = get_klines(interval)
+        if not candles:
+            ok.append(f"{interval}: ❌ خطا")
+        else:
+            ok.append(f"{interval}: ✅ OK (Close: {candles[-1]['close']:.2f})")
+    await update.message.reply_text("\n".join(ok))
 
 # =========================
 # Main
