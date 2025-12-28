@@ -4,8 +4,19 @@ import requests
 import random
 from datetime import date
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+
 import pandas as pd
 
 # ======================
@@ -13,9 +24,11 @@ import pandas as pd
 # ======================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
+SYMBOL = "BTCUSDT"
+TIMEFRAMES = ["5m", "15m", "30m"]
 
 # ======================
-# Fake Web Server برای Render
+# Fake Web Server (Render)
 # ======================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -28,190 +41,162 @@ def run_server():
     server.serve_forever()
 
 # ======================
-# دریافت کندل‌ها
+# دریافت کندل‌ها (Safe)
 # ======================
-def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
+def get_klines(interval, limit=120):
     url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    r = requests.get(url, params=params, timeout=10)
-    data = r.json()
-    candles = []
-    for k in data:
-        candles.append({
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5])
-        })
-    return candles
+    params = {"symbol": SYMBOL, "interval": interval, "limit": limit}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        candles = []
+        for k in data:
+            try:
+                candles.append({
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5])
+                })
+            except:
+                continue
+        return candles
+    except:
+        return []
 
 # ======================
-# Market Structure
+# تحلیل‌ها
 # ======================
-def market_structure(candles):
-    if candles[-1]["high"] > candles[-2]["high"] and candles[-1]["low"] > candles[-2]["low"]:
+def market_structure(c):
+    if c[-1]["high"] > c[-2]["high"] and c[-1]["low"] > c[-2]["low"]:
         return "BULLISH"
-    if candles[-1]["high"] < candles[-2]["high"] and candles[-1]["low"] < candles[-2]["low"]:
+    if c[-1]["high"] < c[-2]["high"] and c[-1]["low"] < c[-2]["low"]:
         return "BEARISH"
     return "RANGE"
 
-# ======================
-# Price Action
-# ======================
-def price_action(candle, direction):
+def price_action(candle, side):
     body = abs(candle["close"] - candle["open"])
-    range_ = candle["high"] - candle["low"]
-    if range_ == 0:
+    rng = candle["high"] - candle["low"]
+    if rng == 0:
         return False
-    strength = body / range_
-    if direction == "LONG" and candle["close"] > candle["open"] and strength > 0.6:
-        return True
-    if direction == "SHORT" and candle["close"] < candle["open"] and strength > 0.6:
-        return True
+    power = body / rng
+    if side == "LONG":
+        return candle["close"] > candle["open"] and power > 0.6
+    if side == "SHORT":
+        return candle["close"] < candle["open"] and power > 0.6
     return False
 
-# ======================
-# EMA / RSI / Volume
-# ======================
-def indicators_confirm(candles, direction):
+def indicators(candles, side):
     df = pd.DataFrame(candles)
-    df["EMA9"] = df["close"].ewm(span=9, adjust=False).mean()
-    df["EMA21"] = df["close"].ewm(span=21, adjust=False).mean()
-    df["diff"] = df["EMA9"] - df["EMA21"]
-    df["RSI"] = 100 - (100 / (1 + (df["close"].diff().clip(lower=0).rolling(14).mean() /
+    df["ema9"] = df["close"].ewm(span=9).mean()
+    df["ema21"] = df["close"].ewm(span=21).mean()
+    df["rsi"] = 100 - (100 / (1 + (df["close"].diff().clip(lower=0).rolling(14).mean() /
                                    df["close"].diff().abs().rolling(14).mean())))
-    df["volume_avg"] = df["volume"].rolling(20).mean()
     last = df.iloc[-1]
-
-    if direction == "LONG":
-        return last["diff"] > 0 and last["RSI"] > 50 and last["volume"] > last["volume_avg"]
-    if direction == "SHORT":
-        return last["diff"] < 0 and last["RSI"] < 50 and last["volume"] > last["volume_avg"]
+    if side == "LONG":
+        return last["ema9"] > last["ema21"] and last["rsi"] > 50
+    if side == "SHORT":
+        return last["ema9"] < last["ema21"] and last["rsi"] < 50
     return False
 
-# ======================
-# حمایت/مقاومت و NDS
-# ======================
-def get_support_resistance(candles, n=50):
-    highs = [c["high"] for c in candles[-n:]]
-    lows = [c["low"] for c in candles[-n:]]
-    resistance = max(highs)
-    support = min(lows)
-    return support, resistance
-
-def nds_filter(candles, direction):
-    support, resistance = get_support_resistance(candles)
-    last_close = candles[-1]["close"]
-    if direction == "LONG" and last_close < resistance:
-        return True
-    if direction == "SHORT" and last_close > support:
-        return True
-    return False
+def support_resistance(c):
+    highs = [x["high"] for x in c[-50:]]
+    lows = [x["low"] for x in c[-50:]]
+    return min(lows), max(highs)
 
 # ======================
-# بررسی اخبار ساده (10% احتمال خبر مهم)
+# محدودیت ۳ سیگنال
 # ======================
-def check_news():
-    return random.randint(1, 10) == 1
+signals_today = {}
 
-# ======================
-# بررسی شکست ترند یا حمایت/مقاومت
-# ======================
-def trend_break(candles, direction):
-    support, resistance = get_support_resistance(candles)
-    last_close = candles[-1]["close"]
-    if direction == "LONG" and last_close > resistance:
-        return True
-    if direction == "SHORT" and last_close < support:
-        return True
-    return False
+def can_send():
+    today = date.today().isoformat()
+    if today not in signals_today:
+        signals_today[today] = 0
+    if signals_today[today] >= 3:
+        return False
+    signals_today[today] += 1
+    return True
 
 # ======================
 # ساخت سیگنال
 # ======================
-def build_signal(symbol, interval):
-    if check_news():
-        return "NEWS_BLOCK", None, None, None, None
+def analyze(interval):
+    candles = get_klines(interval)
+    if len(candles) < 50:
+        return "⛔️ دیتا کافی نیست"
 
-    candles = get_klines(symbol, interval)
     structure = market_structure(candles)
     last = candles[-1]
     prev = candles[-2]
+    sup, res = support_resistance(candles)
 
-    if structure == "BULLISH" and price_action(last, "LONG") and indicators_confirm(candles, "LONG") and nds_filter(candles, "LONG"):
+    if structure == "BULLISH" and price_action(last, "LONG") and indicators(candles, "LONG"):
         entry = last["close"]
         sl = prev["low"]
         tp = entry + (entry - sl) * 2
-        reason = "BULLISH + PriceAction + EMA/RSI + NDS + Support OK"
-        return "LONG", entry, sl, tp, reason
+        return f"""🟢 LONG BTC
+TF: {interval}
 
-    if structure == "BEARISH" and price_action(last, "SHORT") and indicators_confirm(candles, "SHORT") and nds_filter(candles, "SHORT"):
+Entry: {entry:.2f}
+SL: {sl:.2f}
+TP: {tp:.2f}
+
+Structure: Bullish
+"""
+
+    if structure == "BEARISH" and price_action(last, "SHORT") and indicators(candles, "SHORT"):
         entry = last["close"]
         sl = prev["high"]
         tp = entry - (sl - entry) * 2
-        reason = "BEARISH + PriceAction + EMA/RSI + NDS + Resistance OK"
-        return "SHORT", entry, sl, tp, reason
+        return f"""🔴 SHORT BTC
+TF: {interval}
 
-    # بررسی شکست ترند
-    if trend_break(candles, "LONG"):
-        return "TREND_BREAK_LONG", last["close"], prev["low"], last["close"] + (last["close"] - prev["low"]) * 2, "Break Resistance"
-    if trend_break(candles, "SHORT"):
-        return "TREND_BREAK_SHORT", last["close"], prev["high"], prev["high"] - (last["close"] - prev["high"]) * 2, "Break Support"
+Entry: {entry:.2f}
+SL: {sl:.2f}
+TP: {tp:.2f}
 
-    return None
+Structure: Bearish
+"""
 
-# ======================
-# محدودیت ۳ سیگنال در روز
-# ======================
-signals_today = {}
-def can_send(symbol):
-    today = date.today().isoformat()
-    key = f"{symbol}_{today}"
-    if key not in signals_today:
-        signals_today[key] = 0
-    if signals_today[key] >= 3:
-        return False
-    signals_today[key] += 1
-    return True
+    return f"⏸ BTC ({interval})\nشرایط ورود مناسب نیست"
 
 # ======================
-# دستور /start تلگرام
+# منو
+# ======================
+def main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 بررسی بازار BTC", callback_data="scan")],
+        [InlineKeyboardButton("📊 تحلیل 5m / 15m / 30m", callback_data="analysis")],
+        [InlineKeyboardButton("ℹ️ وضعیت امروز", callback_data="status")]
+    ])
+
+# ======================
+# Handlers
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbol = "BTCUSDT"
-    for interval in ["5m", "15m", "30m"]:
-        if not can_send(symbol):
-            await update.message.reply_text(f"⛔️ سقف سیگنال امروز {symbol} پر شده")
-            continue
+    await update.message.reply_text(
+        "🤖 ربات تحلیل BTC فعال است\nانتخاب کن:",
+        reply_markup=main_menu()
+    )
 
-        signal = build_signal(symbol, interval)
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
 
-        if signal is None:
-            await update.message.reply_text(f"⏸ {symbol} ({interval})\nفعلاً شرایط ورود مناسب نیست")
-            continue
+    if q.data == "status":
+        today = date.today().isoformat()
+        used = signals_today.get(today, 0)
+        await q.message.reply_text(f"📊 سیگنال‌های امروز: {used}/3")
 
-        if signal[0] == "NEWS_BLOCK":
-            await update.message.reply_text(f"⚠️ خبر مهم منتشر شده، ورود در حال حاضر توصیه نمی‌شود ({interval})")
-            continue
-
-        side, entry, sl, tp, reason = signal
-        await update.message.reply_text(
-            f"""
-📊 {symbol}
-🕒 TF: {interval}
-
-{'🟢 LONG' if side=='LONG' else '🔴 SHORT'}
-
-🎯 Entry: {entry:.2f}
-🛑 Stop Loss: {sl:.2f}
-💰 Take Profit: {tp:.2f}
-
-✅ دلیل: {reason}
-
-⚠️ ریسک متوسط – فقط تحلیل
-"""
-        )
+    if q.data in ["scan", "analysis"]:
+        if not can_send():
+            await q.message.reply_text("⛔️ سقف ۳ سیگنال امروز پر شده")
+            return
+        for tf in TIMEFRAMES:
+            await q.message.reply_text(analyze(tf))
 
 # ======================
 # Main
@@ -219,6 +204,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(menu_handler))
     threading.Thread(target=run_server).start()
     app.run_polling()
 
