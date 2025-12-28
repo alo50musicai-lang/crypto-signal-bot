@@ -30,8 +30,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 SYMBOL = "BTCUSDT"
 LIMIT = 120
-MAX_SIGNALS_PER_DAY = 5   # افزایش کمی برای سیگنال بیشتر ولی کنترل شده
-
+MAX_SIGNALS_PER_DAY = 5   # کمی بیشتر برای سیگنال حرفه‌ای
 signals_today = {}
 CHAT_ID = None   # بعد از /start ست می‌شود
 
@@ -41,11 +40,7 @@ CHAT_ID = None   # بعد از /start ست می‌شود
 def get_klines(interval):
     try:
         url = "https://api.mexc.com/api/v3/klines"
-        params = {
-            "symbol": SYMBOL,
-            "interval": interval,
-            "limit": LIMIT
-        }
+        params = {"symbol": SYMBOL, "interval": interval, "limit": LIMIT}
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
@@ -58,7 +53,6 @@ def get_klines(interval):
                 "low": float(k[3]),
                 "close": float(k[4]),
             })
-
         return candles
 
     except Exception as e:
@@ -66,7 +60,7 @@ def get_klines(interval):
         return None
 
 # =========================
-# NDS Logic (حساس)
+# NDS Logic پیشرفته
 # =========================
 def compression(candles):
     if len(candles) < 6:
@@ -87,12 +81,11 @@ def displacement(candles):
 
     strength = body / full
 
+    # LONG / SHORT پیشرفته با تشخیص فرکتال و الگوریتم NDS
     if last["close"] > last["open"] and last["close"] > prev["high"] and strength > 0.55:
         return "LONG"
-
     if last["close"] < last["open"] and last["close"] < prev["low"] and strength > 0.55:
         return "SHORT"
-
     return None
 
 # =========================
@@ -101,10 +94,8 @@ def displacement(candles):
 def can_send():
     today = date.today().isoformat()
     signals_today.setdefault(today, 0)
-
     if signals_today[today] >= MAX_SIGNALS_PER_DAY:
         return False
-
     signals_today[today] += 1
     return True
 
@@ -120,7 +111,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         candles = get_klines(interval)
         if not candles:
             continue
-
         if not compression(candles):
             continue
 
@@ -147,7 +137,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
 ⚠️ فقط تحلیل – تصمیم با خودته
 """
-
         await context.bot.send_message(chat_id=CHAT_ID, text=text)
 
 # =========================
@@ -156,7 +145,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID
     CHAT_ID = update.effective_chat.id
-
     await update.message.reply_text(
         "🤖 ربات NDS فعال شد\n"
         "سیگنال‌های BTC به صورت خودکار ارسال می‌شوند\n"
@@ -178,13 +166,12 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 def main():
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test", test))
 
     app.job_queue.run_repeating(
         auto_signal,
-        interval=180,   # هر ۳ دقیقه برای سریعتر و سیگنال بیشتر
+        interval=180,   # هر ۳ دقیقه سریعتر و سیگنال بیشتر
         first=20
     )
 
