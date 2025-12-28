@@ -1,16 +1,18 @@
 import os
 import threading
 import requests
-import numpy as np
-import pandas as pd
+import random
 from datetime import date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+import pandas as pd
 
+# ======================
+# تنظیمات
+# ======================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
-CRYPTOPANIC_API = os.getenv("CRYPTOPANIC_API")  # اختیاری برای اخبار
 
 # ======================
 # Fake Web Server برای Render
@@ -26,77 +28,33 @@ def run_server():
     server.serve_forever()
 
 # ======================
-# Binance Candles
+# دریافت کندل‌ها
 # ======================
-def get_klines(symbol="BTCUSDT", interval="5m", limit=200):
-    try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/klines",
-            params={"symbol": symbol, "interval": interval, "limit": limit},
-            timeout=10
-        )
-        data = r.json()
-    except:
-        return None
-
-    if not isinstance(data, list):
-        return None
-
+def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json()
     candles = []
     for k in data:
-        try:
-            candles.append({
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4]),
-                "volume": float(k[5])
-            })
-        except:
-            return None
-
-    if len(candles) < 3:
-        return None
+        candles.append({
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low": float(k[3]),
+            "close": float(k[4]),
+            "volume": float(k[5])
+        })
     return candles
 
 # ======================
-# تبدیل به DataFrame برای اندیکاتورها
+# Market Structure
 # ======================
-def to_dataframe(candles):
-    df = pd.DataFrame(candles)
-    df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
-    df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    df['MACD'] = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
-    df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    return df
-
-# ======================
-# کندل شناسی ساده
-# ======================
-def candlestick_pattern(candle, prev):
-    # Bullish Engulfing
-    if candle['close'] > candle['open'] and prev['close'] < prev['open'] and candle['close'] > prev['open'] and candle['open'] < prev['close']:
-        return "BULLISH_ENGULFING"
-    # Bearish Engulfing
-    if candle['close'] < candle['open'] and prev['close'] > prev['open'] and candle['close'] < prev['open'] and candle['open'] > prev['close']:
-        return "BEARISH_ENGULFING"
-    # Hammer
-    body = abs(candle['close'] - candle['open'])
-    lower = candle['open'] - candle['low'] if candle['close'] > candle['open'] else candle['close'] - candle['low']
-    upper = candle['high'] - candle['close'] if candle['close'] > candle['open'] else candle['high'] - candle['open']
-    if lower > 2 * body and upper < body:
-        return "HAMMER"
-    # Shooting Star
-    if upper > 2 * body and lower < body:
-        return "SHOOTING_STAR"
-    return None
+def market_structure(candles):
+    if candles[-1]["high"] > candles[-2]["high"] and candles[-1]["low"] > candles[-2]["low"]:
+        return "BULLISH"
+    if candles[-1]["high"] < candles[-2]["high"] and candles[-1]["low"] < candles[-2]["low"]:
+        return "BEARISH"
+    return "RANGE"
 
 # ======================
 # Price Action
@@ -104,7 +62,7 @@ def candlestick_pattern(candle, prev):
 def price_action(candle, direction):
     body = abs(candle["close"] - candle["open"])
     range_ = candle["high"] - candle["low"]
-    if range_ <= 0:
+    if range_ == 0:
         return False
     strength = body / range_
     if direction == "LONG" and candle["close"] > candle["open"] and strength > 0.6:
@@ -114,69 +72,92 @@ def price_action(candle, direction):
     return False
 
 # ======================
-# NDS ساده
+# EMA / RSI / Volume
 # ======================
-def nds_trend(candles):
-    highs = [c["high"] for c in candles[-5:]]
-    lows = [c["low"] for c in candles[-5:]]
-    if sum([highs[i]-highs[i-1] for i in range(1,5)]) > 0 and sum([lows[i]-lows[i-1] for i in range(1,5)]) > 0:
-        return "BULLISH"
-    if sum([highs[i]-highs[i-1] for i in range(1,5)]) < 0 and sum([lows[i]-lows[i-1] for i in range(1,5)]) < 0:
-        return "BEARISH"
-    return "RANGE"
+def indicators_confirm(candles, direction):
+    df = pd.DataFrame(candles)
+    df["EMA9"] = df["close"].ewm(span=9, adjust=False).mean()
+    df["EMA21"] = df["close"].ewm(span=21, adjust=False).mean()
+    df["diff"] = df["EMA9"] - df["EMA21"]
+    df["RSI"] = 100 - (100 / (1 + (df["close"].diff().clip(lower=0).rolling(14).mean() /
+                                   df["close"].diff().abs().rolling(14).mean())))
+    df["volume_avg"] = df["volume"].rolling(20).mean()
+    last = df.iloc[-1]
 
-# ======================
-# Elliott Wave ساده
-# ======================
-def elliott_wave(candles):
-    if candles[-1]["close"] > candles[-2]["close"] and candles[-2]["close"] > candles[-3]["close"]:
-        return "BULLISH"
-    if candles[-1]["close"] < candles[-2]["close"] and candles[-2]["close"] < candles[-3]["close"]:
-        return "BEARISH"
-    return "NEUTRAL"
-
-# ======================
-# اخبار کریپتو
-# ======================
-def check_news(symbol):
-    if not CRYPTOPANIC_API:
-        return False
-    try:
-        url = f"https://cryptopanic.com/api/v1/posts/?auth_token={CRYPTOPANIC_API}&currencies={symbol[:3]}"
-        r = requests.get(url, timeout=5).json()
-        for post in r.get("results", []):
-            if post["importance"] == "high":
-                return True
-    except:
-        return False
+    if direction == "LONG":
+        return last["diff"] > 0 and last["RSI"] > 50 and last["volume"] > last["volume_avg"]
+    if direction == "SHORT":
+        return last["diff"] < 0 and last["RSI"] < 50 and last["volume"] > last["volume_avg"]
     return False
 
 # ======================
-# Build Signal
+# حمایت/مقاومت و NDS
+# ======================
+def get_support_resistance(candles, n=50):
+    highs = [c["high"] for c in candles[-n:]]
+    lows = [c["low"] for c in candles[-n:]]
+    resistance = max(highs)
+    support = min(lows)
+    return support, resistance
+
+def nds_filter(candles, direction):
+    support, resistance = get_support_resistance(candles)
+    last_close = candles[-1]["close"]
+    if direction == "LONG" and last_close < resistance:
+        return True
+    if direction == "SHORT" and last_close > support:
+        return True
+    return False
+
+# ======================
+# بررسی اخبار ساده (10% احتمال خبر مهم)
+# ======================
+def check_news():
+    return random.randint(1, 10) == 1
+
+# ======================
+# بررسی شکست ترند یا حمایت/مقاومت
+# ======================
+def trend_break(candles, direction):
+    support, resistance = get_support_resistance(candles)
+    last_close = candles[-1]["close"]
+    if direction == "LONG" and last_close > resistance:
+        return True
+    if direction == "SHORT" and last_close < support:
+        return True
+    return False
+
+# ======================
+# ساخت سیگنال
 # ======================
 def build_signal(symbol, interval):
+    if check_news():
+        return "NEWS_BLOCK", None, None, None, None
+
     candles = get_klines(symbol, interval)
-    if not candles:
-        return None
-    df = to_dataframe(candles)
-    ms = "BULLISH" if df['close'].iloc[-1] > df['close'].iloc[-2] else "BEARISH"
-    nds = nds_trend(candles)
-    wave = elliott_wave(candles)
-    news = check_news(symbol)
-    pattern = candlestick_pattern(candles[-1], candles[-2])
+    structure = market_structure(candles)
+    last = candles[-1]
+    prev = candles[-2]
 
-    # شرط نهایی: همه فاکتورها هم‌جهت
-    if ms == "BULLISH" and nds == "BULLISH" and wave == "BULLISH" and not news and price_action(candles[-1], "LONG"):
-        entry = candles[-1]["close"]
-        sl = candles[-2]["low"]
+    if structure == "BULLISH" and price_action(last, "LONG") and indicators_confirm(candles, "LONG") and nds_filter(candles, "LONG"):
+        entry = last["close"]
+        sl = prev["low"]
         tp = entry + (entry - sl) * 2
-        return "LONG", entry, sl, tp, pattern
+        reason = "BULLISH + PriceAction + EMA/RSI + NDS + Support OK"
+        return "LONG", entry, sl, tp, reason
 
-    if ms == "BEARISH" and nds == "BEARISH" and wave == "BEARISH" and not news and price_action(candles[-1], "SHORT"):
-        entry = candles[-1]["close"]
-        sl = candles[-2]["high"]
+    if structure == "BEARISH" and price_action(last, "SHORT") and indicators_confirm(candles, "SHORT") and nds_filter(candles, "SHORT"):
+        entry = last["close"]
+        sl = prev["high"]
         tp = entry - (sl - entry) * 2
-        return "SHORT", entry, sl, tp, pattern
+        reason = "BEARISH + PriceAction + EMA/RSI + NDS + Resistance OK"
+        return "SHORT", entry, sl, tp, reason
+
+    # بررسی شکست ترند
+    if trend_break(candles, "LONG"):
+        return "TREND_BREAK_LONG", last["close"], prev["low"], last["close"] + (last["close"] - prev["low"]) * 2, "Break Resistance"
+    if trend_break(candles, "SHORT"):
+        return "TREND_BREAK_SHORT", last["close"], prev["high"], prev["high"] - (last["close"] - prev["high"]) * 2, "Break Support"
 
     return None
 
@@ -184,7 +165,6 @@ def build_signal(symbol, interval):
 # محدودیت ۳ سیگنال در روز
 # ======================
 signals_today = {}
-
 def can_send(symbol):
     today = date.today().isoformat()
     key = f"{symbol}_{today}"
@@ -196,35 +176,50 @@ def can_send(symbol):
     return True
 
 # ======================
-# Telegram Command
+# دستور /start تلگرام
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = "BTCUSDT"
-    timeframes = ["5m", "15m", "30m"]
+    for interval in ["5m", "15m", "30m"]:
+        if not can_send(symbol):
+            await update.message.reply_text(f"⛔️ سقف سیگنال امروز {symbol} پر شده")
+            continue
 
-    if not can_send(symbol):
-        await update.message.reply_text(f"⛔️ سقف سیگنال امروز {symbol} پر شده")
-        return
+        signal = build_signal(symbol, interval)
 
-    msg = f"📊 {symbol}\n"
-    for tf in timeframes:
-        signal = build_signal(symbol, tf)
-        if signal:
-            side, entry, sl, tp, pattern = signal
-            msg += f"\n🕒 TF: {tf}\n{'🟢 LONG' if side=='LONG' else '🔴 SHORT'}\n🎯 Entry: {entry:.2f}\n🛑 SL: {sl:.2f}\n💰 TP: {tp:.2f}\n📌 Pattern: {pattern}\n"
-        else:
-            msg += f"\n🕒 TF: {tf}\n⏸ شرایط ورود مناسب نیست یا خبر منفی\n"
+        if signal is None:
+            await update.message.reply_text(f"⏸ {symbol} ({interval})\nفعلاً شرایط ورود مناسب نیست")
+            continue
 
-    msg += "\n⚠️ ریسک متوسط – فقط تحلیل"
-    await update.message.reply_text(msg)
+        if signal[0] == "NEWS_BLOCK":
+            await update.message.reply_text(f"⚠️ خبر مهم منتشر شده، ورود در حال حاضر توصیه نمی‌شود ({interval})")
+            continue
+
+        side, entry, sl, tp, reason = signal
+        await update.message.reply_text(
+            f"""
+📊 {symbol}
+🕒 TF: {interval}
+
+{'🟢 LONG' if side=='LONG' else '🔴 SHORT'}
+
+🎯 Entry: {entry:.2f}
+🛑 Stop Loss: {sl:.2f}
+💰 Take Profit: {tp:.2f}
+
+✅ دلیل: {reason}
+
+⚠️ ریسک متوسط – فقط تحلیل
+"""
+        )
 
 # ======================
 # Main
 # ======================
 def main():
-    threading.Thread(target=run_server).start()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    threading.Thread(target=run_server).start()
     app.run_polling()
 
 if __name__ == "__main__":
