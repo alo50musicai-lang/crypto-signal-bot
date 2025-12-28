@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # =========================
 # Fake Web Server (برای Render)
 # =========================
-PORT = int(os.getenv("PORT", 10000"))
+PORT = int(os.getenv("PORT", 10000))
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -30,11 +30,11 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 SYMBOL = "BTC_USDT"
 INTERVAL = "15m"
 LIMIT = 120
-MAX_SIGNALS_PER_DAY = 5  # افزایش به ۵ سیگنال
+MAX_SIGNALS_PER_DAY = 5  # افزایش کمی سیگنال
 signals_today = {}
 
 # =========================
-# Get Candles (MEXC)
+# دریافت کندل‌ها (MEXC)
 # =========================
 def get_klines():
     try:
@@ -64,7 +64,7 @@ def compression(candles):
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
     avg_range = sum(ranges) / len(ranges)
     last_range = candles[-1]["high"] - candles[-1]["low"]
-    return last_range < avg_range * 0.85  # حساسیت کمی کاهش داده شد
+    return last_range < avg_range * 0.85
 
 def displacement(candles):
     last = candles[-1]
@@ -81,7 +81,7 @@ def displacement(candles):
     return None
 
 # =========================
-# Signal Limit
+# محدودیت سیگنال در روز
 # =========================
 def can_send():
     today = date.today().isoformat()
@@ -92,7 +92,7 @@ def can_send():
     return True
 
 # =========================
-# Auto Signal
+# ارسال خودکار سیگنال
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     candles = get_klines()
@@ -123,7 +123,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=context.bot.id, text=text)
 
 # =========================
-# Commands
+# دستورات تلگرام
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -147,7 +147,10 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test", test))
-    app.job_queue.run_repeating(auto_signal, interval=300, first=20)  # هر ۵ دقیقه
+
+    # ارسال سیگنال کمی سریع‌تر (هر ۴ دقیقه)
+    app.job_queue.run_repeating(auto_signal, interval=240, first=15)
+
     app.run_polling()
 
 if __name__ == "__main__":
