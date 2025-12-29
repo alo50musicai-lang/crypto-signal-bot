@@ -121,7 +121,7 @@ def can_send():
     return True
 
 # =========================
-# Auto Signal
+# Auto Signal با فیلتر پتانسیل بزرگ
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID
@@ -148,6 +148,11 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         entry = last["close"]
         sl = prev["low"] if "LONG" in side else prev["high"]
         tp = entry + (entry - sl) * 2 if "LONG" in side else entry - (sl - entry) * 2
+
+        # فیلتر پتانسیل سود بزرگ (حداقل 500 دلار اختلاف)
+        movement = abs(tp - entry)
+        if movement < 500:
+            continue  # سیگنال‌های کوچک رد می‌شوند
 
         text = f"""
 🚨 BTC NDS SIGNAL
