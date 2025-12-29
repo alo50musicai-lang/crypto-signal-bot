@@ -236,21 +236,32 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(ok))
 
 # =========================
+# Command: /id
+# =========================
+async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(f"🆔 Chat ID شما: {chat_id}")
+
+# =========================
 # Main
 # =========================
 def main():
     app = Application.builder().token(TOKEN).build()
 
+    # Command Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CommandHandler("test", test))
-    
+    app.add_handler(CommandHandler("id", show_id))
+
+    # Job Queue
     app.job_queue.run_repeating(
         auto_signal,
         interval=180,
         first=20
     )
 
+    # Start Bot
     app.run_polling()
 
 if __name__ == "__main__":
