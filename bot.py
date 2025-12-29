@@ -243,7 +243,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CommandHandler("test", test))
-
+    app.add_handler(CommandHandler("id", show_id))
     app.job_queue.run_repeating(
         auto_signal,
         interval=180,
