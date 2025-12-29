@@ -186,9 +186,7 @@ TF: {interval}
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID, ADMIN_ID
-    async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    await update.message.reply_text(f"🆔 Chat ID شما: {chat_id}")
+    
     CHAT_ID = update.effective_chat.id
 
     if ADMIN_ID is None:
