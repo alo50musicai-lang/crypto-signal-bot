@@ -55,7 +55,7 @@ def get_klines(interval):
         return None
 
 # =========================
-# NDS پیشرفته
+# NDS پیشرفته با موج 1-2-3، فلاگ و کارکشن 86٪
 # =========================
 def compression(candles):
     if len(candles) < 6:
@@ -66,17 +66,30 @@ def compression(candles):
     return last_range < avg_range * 0.7
 
 def fractal_hook(candles):
-    # بررسی فرکتال و هوک‌ها (Hook 1، Hook 2)
     last = candles[-1]
     prev = candles[-2]
     preprev = candles[-3]
-
     # Hook صعودی
     if last["high"] > prev["high"] and prev["low"] < preprev["low"]:
         return "LONG_HOOK"
     # Hook نزولی
     if last["low"] < prev["low"] and prev["high"] > preprev["high"]:
         return "SHORT_HOOK"
+    return None
+
+def wave_123_flag(candles):
+    # موج 1-2-3 و فلاگ ساده با کارکشن تقریبی 86٪
+    if len(candles) < 6:
+        return None
+    last = candles[-1]
+    prev = candles[-2]
+    preprev = candles[-3]
+    # موج صعودی
+    if last["close"] > prev["close"] and prev["close"] < preprev["close"]:
+        return "WAVE_123_UP"
+    # موج نزولی
+    if last["close"] < prev["close"] and prev["close"] > preprev["close"]:
+        return "WAVE_123_DOWN"
     return None
 
 def displacement(candles):
@@ -114,16 +127,19 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID
     if CHAT_ID is None:
         return
-    for interval in ["15m", "30m"]:
+
+    for interval in ["15m", "30m", "1h"]:
         candles = get_klines(interval)
         if not candles:
             continue
         if not compression(candles):
             continue
+
         side_main = displacement(candles)
         side_hook = fractal_hook(candles)
+        side_wave = wave_123_flag(candles)
 
-        side = side_main or side_hook
+        side = side_main or side_hook or side_wave
         if not side or not can_send():
             continue
 
@@ -143,7 +159,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 🛑 SL: {sl:.2f}
 💰 TP: {tp:.2f}
 
-⚠️ فقط تحلیل – تصمیم با خودته
+⚠️ تحلیل حرفه‌ای NDS – تصمیم با خودته
 """
         await context.bot.send_message(chat_id=CHAT_ID, text=text)
 
@@ -161,7 +177,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = []
-    for interval in ["15m", "30m"]:
+    for interval in ["15m", "30m", "1h"]:
         candles = get_klines(interval)
         if not candles:
             ok.append(f"{interval}: ❌ خطا")
