@@ -206,7 +206,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = []
-    candles = get_klines("1h")
+    for interval in ["15m", "30m", "1h"]:
+    candles = get_klines(interval)
     if candles:
         await update.message.reply_text(
             f"✅ اتصال OK\nBTC Close: {candles[-1]['close']:.2f}"
