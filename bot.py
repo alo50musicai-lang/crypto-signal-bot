@@ -7,9 +7,10 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # =========================
-# Fake Web Server (برای Render)
+# Fake Web Server (Render)
 # =========================
 PORT = int(os.getenv("PORT", 10000))
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -27,12 +28,13 @@ threading.Thread(target=run_server, daemon=True).start()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 SYMBOL = "BTCUSDT"
 LIMIT = 120
-MAX_SIGNALS_PER_DAY = 5
+MAX_SIGNALS_PER_DAY = 4
+MIN_PROFIT_USD = 700   # <<< فقط سیگنال‌های بزرگ
 signals_today = {}
-CHAT_ID = None   # بعد از /start ست می‌شود
+CHAT_ID = None
 
 # =========================
-# Get Candles (MEXC v3)
+# Get Candles
 # =========================
 def get_klines(interval):
     try:
@@ -41,73 +43,48 @@ def get_klines(interval):
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
-        candles = []
-        for k in data:
-            candles.append({
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4]),
-            })
-        return candles
+        return [{
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low": float(k[3]),
+            "close": float(k[4]),
+        } for k in data]
     except Exception as e:
         print("❌ Candle Error:", e)
         return None
 
 # =========================
-# NDS پیشرفته با موج 1-2-3، فلاگ و کارکشن 86٪
+# NDS Core Logic
 # =========================
 def compression(candles):
-    if len(candles) < 6:
-        return False
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
-    avg_range = sum(ranges) / len(ranges)
-    last_range = candles[-1]["high"] - candles[-1]["low"]
-    return last_range < avg_range * 0.7
+    return (candles[-1]["high"] - candles[-1]["low"]) < (sum(ranges) / len(ranges)) * 0.7
 
-def fractal_hook(candles):
-    last = candles[-1]
-    prev = candles[-2]
-    preprev = candles[-3]
-    # Hook صعودی
-    if last["high"] > prev["high"] and prev["low"] < preprev["low"]:
-        return "LONG_HOOK"
-    # Hook نزولی
-    if last["low"] < prev["low"] and prev["high"] > preprev["high"]:
-        return "SHORT_HOOK"
+def early_bias(candles):
+    lows = [c["low"] for c in candles[-6:]]
+    highs = [c["high"] for c in candles[-6:]]
+
+    if lows[-1] > lows[-2] > lows[-3]:
+        return "LONG"
+    if highs[-1] < highs[-2] < highs[-3]:
+        return "SHORT"
     return None
 
-def wave_123_flag(candles):
-    # موج 1-2-3 و فلاگ ساده با کارکشن تقریبی 86٪
-    if len(candles) < 6:
-        return None
+def displacement(candles, bias):
     last = candles[-1]
     prev = candles[-2]
-    preprev = candles[-3]
-    # موج صعودی
-    if last["close"] > prev["close"] and prev["close"] < preprev["close"]:
-        return "WAVE_123_UP"
-    # موج نزولی
-    if last["close"] < prev["close"] and prev["close"] > preprev["close"]:
-        return "WAVE_123_DOWN"
-    return None
-
-def displacement(candles):
-    last = candles[-1]
-    prev = candles[-2]
-
     body = abs(last["close"] - last["open"])
     full = last["high"] - last["low"]
     if full == 0:
-        return None
+        return False
+
     strength = body / full
 
-    # سیگنال اصلی NDS با فازی لاجیک
-    if last["close"] > last["open"] and last["close"] > prev["high"] and strength > 0.55:
-        return "LONG"
-    if last["close"] < last["open"] and last["close"] < prev["low"] and strength > 0.55:
-        return "SHORT"
-    return None
+    if bias == "LONG" and last["close"] > prev["high"] and strength > 0.55:
+        return True
+    if bias == "SHORT" and last["close"] < prev["low"] and strength > 0.55:
+        return True
+    return False
 
 # =========================
 # Signal Limit
@@ -121,7 +98,7 @@ def can_send():
     return True
 
 # =========================
-# Auto Signal با فیلتر پتانسیل بزرگ
+# Auto Signal (Option C)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID
@@ -130,41 +107,41 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
     for interval in ["15m", "30m", "1h"]:
         candles = get_klines(interval)
-        if not candles:
-            continue
-        if not compression(candles):
+        if not candles or not compression(candles):
             continue
 
-        side_main = displacement(candles)
-        side_hook = fractal_hook(candles)
-        side_wave = wave_123_flag(candles)
+        bias = early_bias(candles)
+        if not bias:
+            continue
 
-        side = side_main or side_hook or side_wave
-        if not side or not can_send():
+        if not displacement(candles, bias):
             continue
 
         last = candles[-1]
         prev = candles[-2]
-        entry = last["close"]
-        sl = prev["low"] if "LONG" in side else prev["high"]
-        tp = entry + (entry - sl) * 2 if "LONG" in side else entry - (sl - entry) * 2
 
-        # فیلتر پتانسیل سود بزرگ (حداقل 500 دلار اختلاف)
-        movement = abs(tp - entry)
-        if movement < 500:
-            continue  # سیگنال‌های کوچک رد می‌شوند
+        entry = last["close"]
+        sl = prev["low"] if bias == "LONG" else prev["high"]
+        risk = abs(entry - sl)
+
+        tp = entry + risk * 2.5 if bias == "LONG" else entry - risk * 2.5
+        potential = abs(tp - entry)
+
+        if potential < MIN_PROFIT_USD or not can_send():
+            continue
 
         text = f"""
-🚨 BTC NDS SIGNAL
+🚨 BTC NDS PRO SIGNAL
 
-📍 {side}
+📊 BIAS: {bias}
 ⏱ TF: {interval}
 
 🎯 Entry: {entry:.2f}
 🛑 SL: {sl:.2f}
 💰 TP: {tp:.2f}
 
-⚠️ تحلیل حرفه‌ای NDS – تصمیم با خودته
+📈 Potential: {potential:.0f}$+
+⚠️ NDS فازی لاجیک – سیگنال قدرتمند
 """
         await context.bot.send_message(chat_id=CHAT_ID, text=text)
 
@@ -175,20 +152,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID
     CHAT_ID = update.effective_chat.id
     await update.message.reply_text(
-        "🤖 ربات NDS فعال شد\n"
-        "سیگنال‌های BTC به صورت خودکار ارسال می‌شوند\n"
-        "نیازی به دستور نیست"
+        "🤖 ربات NDS حرفه‌ای فعال شد\n"
+        "فقط سیگنال‌های بزرگ (+700$)\n"
+        "جهت بازار قبل از حرکت تشخیص داده می‌شود"
     )
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ok = []
-    for interval in ["15m", "30m", "1h"]:
-        candles = get_klines(interval)
-        if not candles:
-            ok.append(f"{interval}: ❌ خطا")
-        else:
-            ok.append(f"{interval}: ✅ OK (Close: {candles[-1]['close']:.2f})")
-    await update.message.reply_text("\n".join(ok))
+    candles = get_klines("1h")
+    if candles:
+        await update.message.reply_text(f"✅ اتصال OK\nBTC Close: {candles[-1]['close']:.2f}")
+    else:
+        await update.message.reply_text("❌ خطا در دریافت دیتا")
 
 # =========================
 # Main
