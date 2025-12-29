@@ -236,13 +236,14 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی VIP نداری")
         return
 
-     ok = []
+    ok = []
     for interval in ["15m", "30m", "1h"]:
         candles = get_klines(interval)
         if not candles:
             ok.append(f"{interval}: ❌ خطا")
         else:
             ok.append(f"{interval}: ✅ OK (Close: {candles[-1]['close']:.2f})")
+
     await update.message.reply_text("\n".join(ok))
 # =========================
 # Main
