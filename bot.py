@@ -205,6 +205,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ok = []
     candles = get_klines("1h")
     if candles:
         await update.message.reply_text(
