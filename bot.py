@@ -142,7 +142,7 @@ def can_send():
     return True
 
 # =========================
-# Auto Signal (VIP ONLY + NDS دقیق)
+# Auto Signal (VIP ONLY + NDS دقیق + Visual Phase)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     for chat_id in VIP_USERS:
@@ -176,13 +176,12 @@ TF: {interval}
                 continue
 
             # =========================
-            # NDS دقیق - Sequencing 1-2-3 + 86٪ Hook Phase
+            # NDS دقیق - Sequencing 1-2-3 + Hook Phase
             # =========================
             last = candles[-1]
             prev = candles[-2]
             prev2 = candles[-3]
 
-            # مرحله 1-2-3 Sequencing
             if bias == "LONG":
                 seq_ok = prev2["low"] < prev["low"] < last["low"]
             else:
@@ -191,14 +190,12 @@ TF: {interval}
             if not seq_ok:
                 continue
 
-            # محاسبه فاصله Hook Phase
             start_point = prev2["low"] if bias == "LONG" else prev2["high"]
             end_point = last["high"] if bias == "LONG" else last["low"]
             phase_distance = abs(last["close"] - start_point)
             total_distance = abs(end_point - start_point)
             phase_pct = phase_distance / total_distance if total_distance != 0 else 0
 
-            # اگر فاز >= 86٪ طی نشده، هشدار هنوز ورود
             if phase_pct < 0.864:
                 key = (chat_id, interval)
                 now = datetime.utcnow()
@@ -219,7 +216,8 @@ TF: {interval}
                 continue
 
             # =========================
-            # سیگنال نهایی
+            # سیگنال نهایی با Visual Phase
+            # =========================
             entry = last["close"]
             sl = prev["low"] if bias == "LONG" else prev["high"]
             risk = abs(entry - sl)
@@ -231,12 +229,18 @@ TF: {interval}
 
             confidence = confidence_score(candles, bias, potential)
 
+            # نمایش LONG/SHORT با رنگ و نوار بصری Hook Phase
+            color_emoji = "🟢" if bias == "LONG" else "🔴"
+            bar_len = 20
+            filled_len = int(phase_pct * bar_len)
+            visual_bar = "■" * filled_len + "▫" * (bar_len - filled_len)
+
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"""
-🚨 BTC NDS PRO SIGNAL
+🚨 BTC NDS PRO SIGNAL {color_emoji}
 
-📊 Direction: {bias}
+📊 Direction: {bias} {color_emoji}
 ⏱ TF: {interval}
 
 🎯 Entry: {entry:.2f}
@@ -245,6 +249,8 @@ TF: {interval}
 
 📈 Potential: {potential:.0f}$+
 🎯 Confidence: {confidence}%
+📊 Hook Phase: {phase_pct*100:.1f}%
+[{visual_bar}]
 """
             )
 
