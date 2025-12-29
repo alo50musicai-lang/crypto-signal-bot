@@ -2,7 +2,7 @@ import os
 import json
 import threading
 import requests
-from datetime import date
+from datetime import date, datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update
@@ -36,6 +36,7 @@ MAX_SIGNALS_PER_DAY = 4
 MIN_PROFIT_USD = 700
 
 signals_today = {}
+bias_alerts = {}  # هشدار هنوز ورود نداریم
 CHAT_ID = None
 
 # =========================
@@ -154,7 +155,24 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             if not bias:
                 continue
 
+            # ⏳ هنوز ورود نداریم - هشدار محدود
             if not displacement(candles, bias):
+                key = (chat_id, interval)
+                now = datetime.utcnow()
+                if key not in bias_alerts or now - bias_alerts[key] > timedelta(minutes=30):
+                    bias_alerts[key] = now
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"""
+📊 BTC NDS BIAS ALERT
+
+Bias: {bias}
+TF: {interval}
+
+⏳ بازار در حال ساخت روند
+⚠️ هنوز ورود نداریم
+"""
+                    )
                 continue
 
             last = candles[-1]
@@ -231,6 +249,7 @@ async def viplist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🆔 Chat ID: {update.effective_chat.id}")
+
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in VIP_USERS:
         await update.message.reply_text("❌ دسترسی VIP نداری")
@@ -245,6 +264,7 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ok.append(f"{interval}: ✅ OK (Close: {candles[-1]['close']:.2f})")
 
     await update.message.reply_text("\n".join(ok))
+
 # =========================
 # Main
 # =========================
