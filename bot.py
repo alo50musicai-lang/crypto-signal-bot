@@ -37,31 +37,22 @@ MIN_PROFIT_USD = 700   # فقط سیگنال‌های بزرگ
 signals_today = {}
 CHAT_ID = None
 
+# ============ VIP Manual ===========
+VIP_USERS = set()   # chat_id هایی که اجازه دارند
+ADMIN_ID = None     # اولین کسی که /start می‌زند ادمین می‌شود
+
 # =========================
 # Get Candles (MEXC v3 - FIXED)
 # =========================
 def get_klines(interval):
     try:
         url = "https://api.mexc.com/api/v3/klines"
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-        params = {
-            "symbol": SYMBOL,
-            "interval": interval,
-            "limit": LIMIT
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
+        params = {"symbol": SYMBOL, "interval": interval, "limit": LIMIT}
         r = requests.get(url, params=params, headers=headers, timeout=10)
         r.raise_for_status()
         data = r.json()
-
-        return [{
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-        } for k in data]
-
+        return [{"open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4])} for k in data]
     except Exception as e:
         print("❌ Candle Error:", e)
         return None
@@ -80,7 +71,6 @@ def compression(candles):
 def early_bias(candles):
     lows = [c["low"] for c in candles[-4:]]
     highs = [c["high"] for c in candles[-4:]]
-
     if lows[-1] > lows[-2] > lows[-3]:
         return "LONG"
     if highs[-1] < highs[-2] < highs[-3]:
@@ -90,14 +80,11 @@ def early_bias(candles):
 def displacement(candles, bias):
     last = candles[-1]
     prev = candles[-2]
-
     body = abs(last["close"] - last["open"])
     full = last["high"] - last["low"]
     if full == 0:
         return False
-
     strength = body / full
-
     if bias == "LONG" and last["close"] > prev["high"] and strength > 0.55:
         return True
     if bias == "SHORT" and last["close"] < prev["low"] and strength > 0.55:
@@ -128,11 +115,14 @@ def can_send():
     return True
 
 # =========================
-# Auto Signal (Option C +700)
+# Auto Signal (VIP Check + Option C +700)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID
     if CHAT_ID is None:
+        return
+    # ❌ فقط VIP سیگنال می‌گیرند
+    if CHAT_ID not in VIP_USERS:
         return
 
     for interval in ["15m", "30m", "1h"]:
@@ -144,7 +134,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         if not bias:
             continue
 
-        # Bias Alert (قبل از ورود)
         if not displacement(candles, bias):
             await context.bot.send_message(
                 chat_id=CHAT_ID,
@@ -196,15 +185,46 @@ TF: {interval}
 # Commands
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global CHAT_ID
+    global CHAT_ID, ADMIN_ID
     CHAT_ID = update.effective_chat.id
-    await update.message.reply_text(
-        "🤖 ربات NDS حرفه‌ای فعال شد\n"
-        "فقط سیگنال‌های بزرگ (+700$)\n"
-        "تشخیص جهت قبل از ورود"
-    )
+
+    if ADMIN_ID is None:
+        ADMIN_ID = CHAT_ID
+        VIP_USERS.add(CHAT_ID)
+        await update.message.reply_text(
+            "👑 شما ادمین شدید\n"
+            "می‌تونی کاربران VIP رو تأیید کنی"
+        )
+        return
+
+    if CHAT_ID in VIP_USERS:
+        await update.message.reply_text(
+            "✅ دسترسی VIP فعال است\n"
+            "سیگنال‌ها به‌صورت خودکار ارسال می‌شوند"
+        )
+    else:
+        await update.message.reply_text(
+            "⏳ دسترسی شما در انتظار تأیید ادمین است"
+        )
+
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("❌ chat_id نفر را بنویس")
+        return
+    try:
+        user_id = int(context.args[0])
+        VIP_USERS.add(user_id)
+        await update.message.reply_text(f"✅ کاربر {user_id} VIP شد")
+    except:
+        await update.message.reply_text("❌ chat_id نامعتبر")
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if CHAT_ID not in VIP_USERS:
+        await update.message.reply_text("❌ دسترسی شما VIP نیست")
+        return
+
     ok = []
     for interval in ["15m", "30m", "1h"]:
         candles = get_klines(interval)
@@ -221,6 +241,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CommandHandler("test", test))
 
     app.job_queue.run_repeating(
