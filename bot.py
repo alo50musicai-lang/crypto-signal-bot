@@ -1,4 +1,5 @@
 import os
+import json
 import threading
 import requests
 from datetime import date
@@ -32,33 +33,58 @@ SYMBOL = "BTCUSDT"
 LIMIT = 120
 
 MAX_SIGNALS_PER_DAY = 4
-MIN_PROFIT_USD = 700   # فقط سیگنال‌های بزرگ
+MIN_PROFIT_USD = 700
 
 signals_today = {}
 CHAT_ID = None
 
-# ============ VIP Manual ===========
-VIP_USERS = set()   # chat_id هایی که اجازه دارند
-ADMIN_ID = None     # اولین کسی که /start می‌زند ادمین می‌شود
+# =========================
+# VIP STORAGE (SAFE)
+# =========================
+VIP_FILE = "vip_users.json"
+VIP_USERS = set()
+ADMIN_ID = None
+
+def load_vips():
+    global VIP_USERS, ADMIN_ID
+    if os.path.exists(VIP_FILE):
+        with open(VIP_FILE, "r") as f:
+            data = json.load(f)
+            VIP_USERS = set(data.get("vips", []))
+            ADMIN_ID = data.get("admin")
+
+def save_vips():
+    with open(VIP_FILE, "w") as f:
+        json.dump({
+            "admin": ADMIN_ID,
+            "vips": list(VIP_USERS)
+        }, f)
+
+load_vips()
 
 # =========================
-# Get Candles (MEXC v3 - FIXED)
+# Get Candles (MEXC)
 # =========================
 def get_klines(interval):
     try:
-        url = "https://api.mexc.com/api/v3/klines"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        params = {"symbol": SYMBOL, "interval": interval, "limit": LIMIT}
-        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r = requests.get(
+            "https://api.mexc.com/api/v3/klines",
+            params={"symbol": SYMBOL, "interval": interval, "limit": LIMIT},
+            timeout=10
+        )
         r.raise_for_status()
         data = r.json()
-        return [{"open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4])} for k in data]
-    except Exception as e:
-        print("❌ Candle Error:", e)
+        return [{
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low": float(k[3]),
+            "close": float(k[4])
+        } for k in data]
+    except:
         return None
 
 # =========================
-# NDS CORE LOGIC
+# NDS CORE LOGIC (UNCHANGED)
 # =========================
 def compression(candles):
     if len(candles) < 6:
@@ -115,56 +141,39 @@ def can_send():
     return True
 
 # =========================
-# Auto Signal (VIP Check + Option C +700)
+# Auto Signal (VIP ONLY)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
-    global CHAT_ID
-    if CHAT_ID is None:
-        return
-    # ❌ فقط VIP سیگنال می‌گیرند
-    if CHAT_ID not in VIP_USERS:
-        return
+    for chat_id in VIP_USERS:
+        for interval in ["15m", "30m", "1h"]:
+            candles = get_klines(interval)
+            if not candles or not compression(candles):
+                continue
 
-    for interval in ["15m", "30m", "1h"]:
-        candles = get_klines(interval)
-        if not candles or not compression(candles):
-            continue
+            bias = early_bias(candles)
+            if not bias:
+                continue
 
-        bias = early_bias(candles)
-        if not bias:
-            continue
+            if not displacement(candles, bias):
+                continue
 
-        if not displacement(candles, bias):
+            last = candles[-1]
+            prev = candles[-2]
+
+            entry = last["close"]
+            sl = prev["low"] if bias == "LONG" else prev["high"]
+            risk = abs(entry - sl)
+            tp = entry + risk * 2.5 if bias == "LONG" else entry - risk * 2.5
+            potential = abs(tp - entry)
+
+            if potential < MIN_PROFIT_USD or not can_send():
+                continue
+
+            confidence = confidence_score(candles, bias, potential)
+
             await context.bot.send_message(
-                chat_id=CHAT_ID,
+                chat_id=chat_id,
                 text=f"""
-📊 BTC NDS BIAS ALERT
-
-Bias: {bias}
-TF: {interval}
-
-⏳ بازار در حال ساخت روند
-⚠️ هنوز ورود نداریم
-"""
-            )
-            continue
-
-        last = candles[-1]
-        prev = candles[-2]
-
-        entry = last["close"]
-        sl = prev["low"] if bias == "LONG" else prev["high"]
-        risk = abs(entry - sl)
-
-        tp = entry + risk * 2.5 if bias == "LONG" else entry - risk * 2.5
-        potential = abs(tp - entry)
-
-        if potential < MIN_PROFIT_USD or not can_send():
-            continue
-
-        confidence = confidence_score(candles, bias, potential)
-
-        text = f"""
 🚨 BTC NDS PRO SIGNAL
 
 📊 Direction: {bias}
@@ -176,71 +185,52 @@ TF: {interval}
 
 📈 Potential: {potential:.0f}$+
 🎯 Confidence: {confidence}%
-
-⚠️ NDS فازی لاجیک – سیگنال قدرتمند
 """
-        await context.bot.send_message(chat_id=CHAT_ID, text=text)
+            )
 
 # =========================
 # Commands
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global CHAT_ID, ADMIN_ID
-    
-    CHAT_ID = update.effective_chat.id
+    global ADMIN_ID
+    cid = update.effective_chat.id
 
     if ADMIN_ID is None:
-        ADMIN_ID = CHAT_ID
-        VIP_USERS.add(CHAT_ID)
-        await update.message.reply_text(
-            "👑 شما ادمین شدید\n"
-            "می‌تونی کاربران VIP رو تأیید کنی"
-        )
+        ADMIN_ID = cid
+        VIP_USERS.add(cid)
+        save_vips()
+        await update.message.reply_text("👑 شما ادمین شدید")
         return
 
-    if CHAT_ID in VIP_USERS:
-        await update.message.reply_text(
-            "✅ دسترسی VIP فعال است\n"
-            "سیگنال‌ها به‌صورت خودکار ارسال می‌شوند"
-        )
+    if cid in VIP_USERS:
+        await update.message.reply_text("✅ دسترسی VIP فعال است")
     else:
-        await update.message.reply_text(
-            "⏳ دسترسی شما در انتظار تأیید ادمین است"
-        )
+        await update.message.reply_text("⏳ در انتظار تأیید ادمین")
 
 async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
         return
-    if not context.args:
-        await update.message.reply_text("❌ chat_id نفر را بنویس")
+    uid = int(context.args[0])
+    VIP_USERS.add(uid)
+    save_vips()
+    await update.message.reply_text(f"✅ {uid} VIP شد")
+
+async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
         return
-    try:
-        user_id = int(context.args[0])
-        VIP_USERS.add(user_id)
-        await update.message.reply_text(f"✅ کاربر {user_id} VIP شد")
-    except:
-        await update.message.reply_text("❌ chat_id نامعتبر")
+    uid = int(context.args[0])
+    VIP_USERS.discard(uid)
+    save_vips()
+    await update.message.reply_text(f"❌ {uid} حذف شد")
 
-async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if CHAT_ID not in VIP_USERS:
-        await update.message.reply_text("❌ دسترسی شما VIP نیست")
+async def viplist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
         return
+    text = "📋 VIP USERS:\n" + "\n".join(str(x) for x in VIP_USERS)
+    await update.message.reply_text(text)
 
-    ok = []
-    for interval in ["15m", "30m", "1h"]:
-        candles = get_klines(interval)
-        if not candles:
-            ok.append(f"{interval}: ❌ خطا")
-        else:
-            ok.append(f"{interval}: ✅ OK (Close: {candles[-1]['close']:.2f})")
-    await update.message.reply_text("\n".join(ok))
-
-# =========================
-# Command: /id
-# =========================
 async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    await update.message.reply_text(f"🆔 Chat ID شما: {chat_id}")
+    await update.message.reply_text(f"🆔 Chat ID: {update.effective_chat.id}")
 
 # =========================
 # Main
@@ -248,20 +238,13 @@ async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    # Command Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("approve", approve))
-    app.add_handler(CommandHandler("test", test))
+    app.add_handler(CommandHandler("remove", remove))
+    app.add_handler(CommandHandler("viplist", viplist))
     app.add_handler(CommandHandler("id", show_id))
 
-    # Job Queue
-    app.job_queue.run_repeating(
-        auto_signal,
-        interval=180,
-        first=20
-    )
-
-    # Start Bot
+    app.job_queue.run_repeating(auto_signal, interval=180, first=20)
     app.run_polling()
 
 if __name__ == "__main__":
