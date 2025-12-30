@@ -155,7 +155,9 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             if not bias:
                 continue
 
-            time_str = datetime.utcnow().strftime("%Y-%m-%d | %H:%M UTC")
+            # ⏰ Iran Time (UTC + 3:30)
+            iran_time = datetime.utcnow() + timedelta(hours=3, minutes=30)
+            time_str = iran_time.strftime("%Y-%m-%d | %H:%M")
 
             if not displacement(candles, bias):
                 key = (chat_id, interval)
@@ -169,7 +171,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
 Bias: {bias}
 TF: {interval}
-🕒 Time: {time_str}
+🕒 Time (IR): {time_str}
 
 ⏳ بازار در حال ساخت روند
 ⚠️ هنوز ورود نداریم
@@ -221,7 +223,7 @@ TF: {interval}
 
 📊 Direction: {bias} {color_emoji}
 ⏱ TF: {interval}
-🕒 Time: {time_str}
+🕒 Time (IR): {time_str}
 
 🎯 Entry: {entry:.2f}
 🛑 SL: {sl:.2f}
