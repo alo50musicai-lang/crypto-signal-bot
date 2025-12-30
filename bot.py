@@ -36,7 +36,7 @@ MAX_SIGNALS_PER_DAY = 4
 MIN_PROFIT_USD = 700
 
 signals_today = {}
-bias_alerts = {}  # هشدار هنوز ورود نداریم
+bias_alerts = {}
 CHAT_ID = None
 
 # =========================
@@ -85,7 +85,7 @@ def get_klines(interval):
         return None
 
 # =========================
-# NDS CORE LOGIC (UNCHANGED)
+# NDS CORE LOGIC
 # =========================
 def compression(candles):
     if len(candles) < 6:
@@ -142,7 +142,7 @@ def can_send():
     return True
 
 # =========================
-# Auto Signal (VIP ONLY + NDS دقیق + Visual Phase)
+# Auto Signal
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     for chat_id in VIP_USERS:
@@ -155,7 +155,8 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             if not bias:
                 continue
 
-            # ⏳ هنوز ورود نداریم - هشدار محدود
+            time_str = datetime.utcnow().strftime("%Y-%m-%d | %H:%M UTC")
+
             if not displacement(candles, bias):
                 key = (chat_id, interval)
                 now = datetime.utcnow()
@@ -168,6 +169,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
 Bias: {bias}
 TF: {interval}
+🕒 Time: {time_str}
 
 ⏳ بازار در حال ساخت روند
 ⚠️ هنوز ورود نداریم
@@ -175,9 +177,6 @@ TF: {interval}
                     )
                 continue
 
-            # =========================
-            # NDS دقیق - Sequencing 1-2-3 + Hook Phase
-            # =========================
             last = candles[-1]
             prev = candles[-2]
             prev2 = candles[-3]
@@ -197,27 +196,8 @@ TF: {interval}
             phase_pct = phase_distance / total_distance if total_distance != 0 else 0
 
             if phase_pct < 0.864:
-                key = (chat_id, interval)
-                now = datetime.utcnow()
-                if key not in bias_alerts or now - bias_alerts[key] > timedelta(minutes=30):
-                    bias_alerts[key] = now
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"""
-📊 BTC NDS BIAS ALERT
-
-Bias: {bias}
-TF: {interval}
-
-⏳ بازار در حال تکمیل فاز NDS
-⚠️ هنوز ورود نداریم (Hook Phase < 86%)
-"""
-                    )
                 continue
 
-            # =========================
-            # سیگنال نهایی با Visual Phase
-            # =========================
             entry = last["close"]
             sl = prev["low"] if bias == "LONG" else prev["high"]
             risk = abs(entry - sl)
@@ -229,7 +209,6 @@ TF: {interval}
 
             confidence = confidence_score(candles, bias, potential)
 
-            # نمایش LONG/SHORT با رنگ و نوار بصری Hook Phase
             color_emoji = "🟢" if bias == "LONG" else "🔴"
             bar_len = 20
             filled_len = int(phase_pct * bar_len)
@@ -242,6 +221,7 @@ TF: {interval}
 
 📊 Direction: {bias} {color_emoji}
 ⏱ TF: {interval}
+🕒 Time: {time_str}
 
 🎯 Entry: {entry:.2f}
 🛑 SL: {sl:.2f}
