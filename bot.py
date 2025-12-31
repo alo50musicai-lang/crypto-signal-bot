@@ -36,44 +36,21 @@ MAX_SIGNALS_PER_DAY = 4
 MIN_PROFIT_USD = 700
 
 signals_today = {}
-bias_alerts = {}
 CHAT_ID = None
 
 # =========================
-# ===== ADDED =====
-# Persistent files (safe)
+# Persistent Files
 # =========================
 BIAS_STATE_FILE = "bias_state.json"
 SIGNAL_LOG_FILE = "signal_log.json"
 RESTART_LOG_FILE = "restart_log.json"
-
-# =========================
-# VIP STORAGE (SAFE)
-# =========================
 VIP_FILE = "vip_users.json"
+
 VIP_USERS = set()
 ADMIN_ID = None
 
-def load_vips():
-    global VIP_USERS, ADMIN_ID
-    if os.path.exists(VIP_FILE):
-        with open(VIP_FILE, "r") as f:
-            data = json.load(f)
-            VIP_USERS = set(data.get("vips", []))
-            ADMIN_ID = data.get("admin")
-
-def save_vips():
-    with open(VIP_FILE, "w") as f:
-        json.dump({
-            "admin": ADMIN_ID,
-            "vips": list(VIP_USERS)
-        }, f)
-
-load_vips()
-
 # =========================
-# ===== ADDED =====
-# Safe JSON helpers
+# JSON Helpers
 # =========================
 def load_json(path, default):
     if os.path.exists(path):
@@ -89,7 +66,24 @@ def save_json(path, data):
         json.dump(data, f, indent=2)
 
 # =========================
-# Get Candles (MEXC)
+# VIP
+# =========================
+def load_vips():
+    global VIP_USERS, ADMIN_ID
+    if os.path.exists(VIP_FILE):
+        with open(VIP_FILE, "r") as f:
+            data = json.load(f)
+            VIP_USERS = set(data.get("vips", []))
+            ADMIN_ID = data.get("admin")
+
+def save_vips():
+    with open(VIP_FILE, "w") as f:
+        json.dump({"admin": ADMIN_ID, "vips": list(VIP_USERS)}, f)
+
+load_vips()
+
+# =========================
+# Market Data
 # =========================
 def get_klines(interval):
     try:
@@ -110,15 +104,11 @@ def get_klines(interval):
         return None
 
 # =========================
-# NDS CORE LOGIC (UNCHANGED)
+# NDS CORE
 # =========================
 def compression(candles):
-    if len(candles) < 6:
-        return False
     ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
-    avg_range = sum(ranges) / len(ranges)
-    last_range = candles[-1]["high"] - candles[-1]["low"]
-    return last_range < avg_range * 0.7
+    return (candles[-1]["high"] - candles[-1]["low"]) < (sum(ranges)/len(ranges))*0.7
 
 def early_bias(candles):
     lows = [c["low"] for c in candles[-4:]]
@@ -130,8 +120,7 @@ def early_bias(candles):
     return None
 
 def displacement(candles, bias):
-    last = candles[-1]
-    prev = candles[-2]
+    last, prev = candles[-1], candles[-2]
     body = abs(last["close"] - last["open"])
     full = last["high"] - last["low"]
     if full == 0:
@@ -143,16 +132,39 @@ def displacement(candles, bias):
         return True
     return False
 
-def confidence_score(candles, bias, potential):
-    score = 0
-    if compression(candles):
-        score += 25
-    if bias:
-        score += 25
-    if potential > 1000:
-        score += 25
-    if potential > 1500:
-        score += 25
+# =========================
+# PRO ADDITIONS
+# =========================
+def htf_bias():
+    candles = get_klines("4h")
+    if not candles:
+        return None
+    return early_bias(candles)
+
+def valid_session():
+    hour = (datetime.utcnow() + timedelta(hours=3, minutes=30)).hour
+    return (10 <= hour <= 14) or (16 <= hour <= 20)
+
+def liquidity_sweep(candles, bias):
+    if bias == "LONG":
+        return candles[-1]["low"] < min(c["low"] for c in candles[-6:-1])
+    if bias == "SHORT":
+        return candles[-1]["high"] > max(c["high"] for c in candles[-6:-1])
+    return False
+
+def detect_fvg(candles, bias):
+    c1, _, c3 = candles[-3], candles[-2], candles[-1]
+    if bias == "LONG" and c1["high"] < c3["low"]:
+        return (c1["high"], c3["low"])
+    if bias == "SHORT" and c1["low"] > c3["high"]:
+        return (c3["high"], c1["low"])
+    return None
+
+def confidence_score(potential):
+    score = 25
+    if potential > 1000: score += 25
+    if potential > 1500: score += 25
+    if potential > 2000: score += 20
     return min(score, 95)
 
 # =========================
@@ -167,190 +179,140 @@ def can_send():
     return True
 
 # =========================
-# Auto Signal (ONLY ADDITIONS)
+# AUTO SIGNAL
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
+    HTF = htf_bias()
+    if HTF is None:
+        return
+
     bias_state = load_json(BIAS_STATE_FILE, {})
     logs = load_json(SIGNAL_LOG_FILE, [])
 
     for chat_id in VIP_USERS:
         for interval in ["15m", "30m", "1h"]:
             candles = get_klines(interval)
-            if not candles or not compression(candles):
+            if not candles or not valid_session():
                 continue
 
             bias = early_bias(candles)
-            if not bias:
+            if not bias or bias != HTF:
                 continue
 
-            # ===== ADDED =====
-            # Bias change alert (persistent)
             prev_bias = bias_state.get(interval)
             if prev_bias and prev_bias != bias:
-                iran_time = datetime.utcnow() + timedelta(hours=3, minutes=30)
-                time_str = iran_time.strftime("%Y-%m-%d | %H:%M")
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"""
-🔔 BTC BIAS CHANGE ALERT
-
-TF: {interval}
-Previous: {prev_bias}
-Current: {bias}
-🕒 Time (IR): {time_str}
-"""
+                    text=f"🔔 BIAS CHANGE\nTF:{interval}\n{prev_bias} ➜ {bias}"
                 )
             bias_state[interval] = bias
             save_json(BIAS_STATE_FILE, bias_state)
 
-            # ⏰ Iran Time
-            iran_time = datetime.utcnow() + timedelta(hours=3, minutes=30)
-            time_str = iran_time.strftime("%Y-%m-%d | %H:%M")
-
+            if not compression(candles):
+                continue
+            if not liquidity_sweep(candles, bias):
+                continue
             if not displacement(candles, bias):
                 continue
 
-            last = candles[-1]
-            prev = candles[-2]
+            fvg = detect_fvg(candles, bias)
+            if not fvg:
+                continue
 
-            entry = last["close"]
-            sl = prev["low"] if bias == "LONG" else prev["high"]
-            risk = abs(entry - sl)
-            tp = entry + risk * 2.5 if bias == "LONG" else entry - risk * 2.5
+            entry = sum(fvg) / 2
+            risk = abs(fvg[1] - fvg[0])
+
+            if bias == "LONG":
+                sl = fvg[0] - risk * 0.2
+                tp = entry + risk * 3
+                title = "🟢🟢🟢 BTC LONG – NDS PRO"
+            else:
+                sl = fvg[1] + risk * 0.2
+                tp = entry - risk * 3
+                title = "🔴🔴🔴 BTC SHORT – NDS PRO"
+
             potential = abs(tp - entry)
-
             if potential < MIN_PROFIT_USD or not can_send():
                 continue
 
-            confidence = confidence_score(candles, bias, potential)
+            confidence = confidence_score(potential)
+            grade = "A" if confidence >= 80 else "B" if confidence >= 60 else "C"
 
-            # ===== ADDED =====
-            # Grade A/B/C
-            grade = "C"
-            score = 0
-            if confidence >= 75:
-                score += 1
-            if interval == "1h":
-                score += 1
-            if potential >= 1500:
-                score += 1
-
-            if score == 3:
-                grade = "A"
-            elif score == 2:
-                grade = "B"
-
-            # ===== ADDED =====
-            # Log signal
-            logs.append({
-                "time": time_str,
-                "tf": interval,
-                "bias": bias,
-                "grade": grade,
-                "entry": round(entry, 2)
-            })
+            logs.append({"tf": interval, "bias": bias, "entry": entry})
             save_json(SIGNAL_LOG_FILE, logs[-200:])
+
+            iran_time = (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%Y-%m-%d | %H:%M")
 
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"""
-🚨 BTC NDS PRO SIGNAL ({grade})
+{title}
 
-Market Bias: {bias}
 TF: {interval}
-🕒 Time (IR): {time_str}
+🕒 {iran_time}
 
-📍 Entry: {entry:.2f}
-🛑 SL: {sl:.2f}
-🎯 TP: {tp:.2f}
+Entry: {entry:.2f}
+SL: {sl:.2f}
+TP: {tp:.2f}
 
-🎯 Confidence: {confidence}%
+Confidence: {confidence}%
+Grade: {grade}
 ⚠️ تصمیم نهایی با شما
 """
             )
 
 # =========================
-# Commands (UNCHANGED)
+# Commands
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ADMIN_ID
     cid = update.effective_chat.id
-
     if ADMIN_ID is None:
         ADMIN_ID = cid
         VIP_USERS.add(cid)
         save_vips()
         await update.message.reply_text("👑 شما ادمین شدید")
-        return
-
-    if cid in VIP_USERS:
-        await update.message.reply_text("✅ دسترسی VIP فعال است")
+    elif cid in VIP_USERS:
+        await update.message.reply_text("✅ VIP فعال است")
     else:
-        await update.message.reply_text("⏳ در انتظار تأیید ادمین")
+        await update.message.reply_text("⏳ در انتظار تایید")
 
 async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != ADMIN_ID:
-        return
-    uid = int(context.args[0])
-    VIP_USERS.add(uid)
-    save_vips()
-    await update.message.reply_text(f"✅ {uid} VIP شد")
+    if update.effective_chat.id == ADMIN_ID:
+        uid = int(context.args[0])
+        VIP_USERS.add(uid)
+        save_vips()
+        await update.message.reply_text("✅ VIP شد")
 
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != ADMIN_ID:
-        return
-    uid = int(context.args[0])
-    VIP_USERS.discard(uid)
-    save_vips()
-    await update.message.reply_text(f"❌ {uid} حذف شد")
+    if update.effective_chat.id == ADMIN_ID:
+        uid = int(context.args[0])
+        VIP_USERS.discard(uid)
+        save_vips()
+        await update.message.reply_text("❌ حذف شد")
 
 async def viplist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != ADMIN_ID:
-        return
-    text = "📋 VIP USERS:\n" + "\n".join(str(x) for x in VIP_USERS)
-    await update.message.reply_text(text)
+    if update.effective_chat.id == ADMIN_ID:
+        await update.message.reply_text("\n".join(str(x) for x in VIP_USERS))
 
 async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🆔 Chat ID: {update.effective_chat.id}")
-
-async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id not in VIP_USERS:
-        await update.message.reply_text("❌ دسترسی VIP نداری")
-        return
-
-    ok = []
-    for interval in ["15m", "30m", "1h"]:
-        candles = get_klines(interval)
-        if not candles:
-            ok.append(f"{interval}: ❌ خطا")
-        else:
-            ok.append(f"{interval}: ✅ Bias = {early_bias(candles)} | Close = {candles[-1]['close']:.2f}")
-
-    await update.message.reply_text("\n".join(ok))
+    await update.message.reply_text(str(update.effective_chat.id))
 
 # =========================
-# Main (UNTOUCHED)
+# Main
 # =========================
 def main():
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(CommandHandler("viplist", viplist))
     app.add_handler(CommandHandler("id", show_id))
-    app.add_handler(CommandHandler("test", test))
-
     app.job_queue.run_repeating(auto_signal, interval=180, first=20)
     app.run_polling()
 
 if __name__ == "__main__":
-    # ===== ADDED =====
-    # Restart log only (no message, safe)
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({
-        "time": (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%Y-%m-%d | %H:%M")
-    })
+    restarts.append({"time": datetime.utcnow().isoformat()})
     save_json(RESTART_LOG_FILE, restarts[-50:])
-
     main()
