@@ -197,27 +197,27 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
 # ===== ADD STRONG MOVE HERE (ADMIN ONLY) =====
-move = abs(c[-1]["close"] - c[-2]["open"])
+        move = abs(c[-1]["close"] - c[-2]["open"])
 
-has_disp = displacement(c, bias)
-has_liq = liquidity_sweep(c, bias)
-fvg = detect_fvg(c, bias)
+        has_disp = displacement(c, bias)
+        has_liq = liquidity_sweep(c, bias)
+        fvg = detect_fvg(c, bias)
 
-if (
-    ADMIN_ID
-    and has_disp
-    and move >= STRONG_MOVE_USD
-    and (not has_liq or not fvg)
-):
-    reason = []
-    if not has_liq:
-        reason.append("No Liquidity")
-    if not fvg:
-        reason.append("No FVG")
+        if (
+           ADMIN_ID
+            and has_disp
+            and move >= STRONG_MOVE_USD
+            and (not has_liq or not fvg)
+        ):
+            reason = []
+            if not has_liq:
+              reason.append("No Liquidity")
+            if not fvg:
+              reason.append("No FVG")
 
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"""
+         await context.bot.send_message(
+               chat_id=ADMIN_ID,
+               text=f"""
 ⚠️ STRONG MOVE – NO ENTRY
 
 Direction: {bias}
