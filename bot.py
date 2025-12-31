@@ -6,38 +6,27 @@ from datetime import date, datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes
+)
 
 # =========================
-# Fake Web Server (Render)
-# =========================
-PORT = int(os.getenv("PORT", 10000))
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
-
-def run_server():
-    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
-
-threading.Thread(target=run_server, daemon=True).start()
-
-# =========================
-# Config
+# CONFIG
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+WEBHOOK_URL = "https://crypto-signal-bot-1-wpdw.onrender.com"
+WEBHOOK_PATH = f"/{TOKEN}"
 
 SYMBOL = "BTCUSDT"
 LIMIT = 120
 MAX_SIGNALS_PER_DAY = 4
 MIN_PROFIT_USD = 700
 
-signals_today = {}
-
 # =========================
-# Persistent Files
+# PERSISTENT FILES
 # =========================
 BIAS_STATE_FILE = "bias_state.json"
 SIGNAL_LOG_FILE = "signal_log.json"
@@ -46,9 +35,10 @@ VIP_FILE = "vip_users.json"
 
 VIP_USERS = set()
 ADMIN_ID = None
+signals_today = {}
 
 # =========================
-# Helpers
+# TIME
 # =========================
 def iran_time():
     return datetime.utcnow() + timedelta(hours=3, minutes=30)
@@ -56,6 +46,9 @@ def iran_time():
 def time_str():
     return iran_time().strftime("%Y-%m-%d | %H:%M")
 
+# =========================
+# JSON HELPERS
+# =========================
 def load_json(path, default):
     if os.path.exists(path):
         try:
@@ -87,7 +80,7 @@ def save_vips():
 load_vips()
 
 # =========================
-# Market Data
+# MARKET DATA
 # =========================
 def get_klines(interval):
     try:
@@ -172,7 +165,7 @@ def confidence_score(p):
     return min(s, 95)
 
 # =========================
-# Limits
+# LIMIT
 # =========================
 def can_send():
     today = date.today().isoformat()
@@ -202,15 +195,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             bias = early_bias(c)
             if not bias or bias != HTF:
                 continue
-
-            prev = bias_state.get(tf)
-            if prev and prev != bias:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🔔 BIAS CHANGE\nTF:{tf}\n{prev} ➜ {bias}\n🕒 {time_str()}"
-                )
-            bias_state[tf] = bias
-            save_json(BIAS_STATE_FILE, bias_state)
 
             if not compression(c):
                 continue
@@ -264,7 +248,7 @@ Grade: {grade}
             )
 
 # =========================
-# HEARTBEAT (ADMIN – 3h)
+# HEARTBEAT (ADMIN – 3H)
 # =========================
 async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
@@ -274,7 +258,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         )
 
 # =========================
-# Commands
+# COMMANDS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ADMIN_ID
@@ -311,7 +295,7 @@ async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(str(update.effective_chat.id))
 
 # =========================
-# Main
+# MAIN
 # =========================
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -322,10 +306,15 @@ def main():
     app.add_handler(CommandHandler("viplist", viplist))
     app.add_handler(CommandHandler("id", show_id))
 
-    app.job_queue.run_repeating(auto_signal, interval=180, first=20)
+    app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
 
-    app.run_polling()
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 10000)),
+        url_path=WEBHOOK_PATH,
+        webhook_url=WEBHOOK_URL + WEBHOOK_PATH
+    )
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
