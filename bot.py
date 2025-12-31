@@ -195,6 +195,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             bias = early_bias(c)
             if not bias or bias != HTF:
                 continue
+                
 move = abs(c[-1]["close"] - c[-2]["open"])
 
 has_disp = displacement(c, bias)
@@ -226,6 +227,8 @@ Reason: {', '.join(reason)}
 🕒 {time_str()}
 """
     )
+    
+    
             if not compression(c):
                 continue
             if not liquidity_sweep(c, bias):
