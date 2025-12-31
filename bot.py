@@ -293,7 +293,23 @@ async def viplist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(str(update.effective_chat.id))
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    candles = get_klines("1m")
+    if not candles:
+        await update.message.reply_text("❌ خطا در دریافت قیمت")
+        return
 
+    last_price = candles[-1]["close"]
+
+    await update.message.reply_text(
+        f"""
+💰 BTC LIVE PRICE
+
+Price: {last_price:.2f} USDT
+🕒 {time_str()}
+Source: MEXC
+"""
+    )
 # =========================
 # MAIN
 # =========================
@@ -305,6 +321,7 @@ def main():
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(CommandHandler("viplist", viplist))
     app.add_handler(CommandHandler("id", show_id))
+app.add_handler(CommandHandler("price", price))
 
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
