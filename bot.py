@@ -29,6 +29,7 @@ STRONG_MOVE_USD = 800
 # =========================
 BIAS_STATE_FILE = "bias_state.json"
 SIGNAL_LOG_FILE = "signal_log.json"
+STRONG_MOVE_LOG_FILE = "strong_move_log.json"
 RESTART_LOG_FILE = "restart_log.json"
 VIP_FILE = "vip_users.json"
 
@@ -44,6 +45,9 @@ def iran_time():
 
 def time_str():
     return iran_time().strftime("%Y-%m-%d | %H:%M")
+
+def today_str():
+    return iran_time().strftime("%Y-%m-%d")
 
 # =========================
 # JSON HELPERS
@@ -175,7 +179,7 @@ def can_send():
     return True
 
 # =========================
-# AUTO SIGNAL (MERGED + STRONG MOVE)
+# AUTO SIGNAL
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     HTF = htf_bias()
@@ -183,6 +187,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         return
 
     logs = load_json(SIGNAL_LOG_FILE, [])
+    strong_logs = load_json(STRONG_MOVE_LOG_FILE, [])
 
     for chat_id in VIP_USERS:
         for tf in ["15m", "30m", "1h"]:
@@ -199,20 +204,18 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             has_liq = liquidity_sweep(c, bias)
             fvg = detect_fvg(c, bias)
 
-            # ===== STRONG MOVE – NO ENTRY (ADMIN ONLY)
             if (
                 ADMIN_ID
                 and has_disp
                 and move >= STRONG_MOVE_USD
                 and (bias != HTF or not has_liq or not fvg)
             ):
-                reason = []
-                if bias != HTF:
-                    reason.append("HTF Mismatch")
-                if not has_liq:
-                    reason.append("No Liquidity")
-                if not fvg:
-                    reason.append("No FVG")
+                strong_logs.append({
+                    "date": today_str(),
+                    "tf": tf,
+                    "bias": bias
+                })
+                save_json(STRONG_MOVE_LOG_FILE, strong_logs[-500:])
 
                 await context.bot.send_message(
                     chat_id=ADMIN_ID,
@@ -222,12 +225,10 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 Direction: {bias}
 TF: {tf}
 Move: ~{int(move)} USDT
-Reason: {', '.join(reason)}
 🕒 {time_str()}
 """
                 )
 
-            # ===== NORMAL SIGNAL (UNCHANGED)
             if bias != HTF:
                 continue
             if not compression(c):
@@ -260,12 +261,20 @@ Reason: {', '.join(reason)}
             conf = confidence_score(potential)
             grade = "A" if conf >= 80 else "B" if conf >= 60 else "C"
 
-            logs.append({"time": time_str(), "tf": tf, "bias": bias, "entry": entry})
-            save_json(SIGNAL_LOG_FILE, logs[-200:])
+            logs.append({
+                "date": today_str(),
+                "grade": grade
+            })
+            save_json(SIGNAL_LOG_FILE, logs[-500:])
 
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"""
+            receivers = set(VIP_USERS)
+            if ADMIN_ID:
+                receivers.add(ADMIN_ID)
+
+            for rid in receivers:
+                await context.bot.send_message(
+                    chat_id=rid,
+                    text=f"""
 {title}
 
 TF: {tf}
@@ -279,7 +288,42 @@ Confidence: {conf}%
 Grade: {grade}
 ⚠️ تصمیم نهایی با شما
 """
-            )
+                )
+
+# =========================
+# DAILY SUMMARY (ADMIN)
+# =========================
+async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
+    if not ADMIN_ID:
+        return
+
+    today = today_str()
+    logs = load_json(SIGNAL_LOG_FILE, [])
+    strong_logs = load_json(STRONG_MOVE_LOG_FILE, [])
+
+    today_signals = [x for x in logs if x.get("date") == today]
+    today_strong = [x for x in strong_logs if x.get("date") == today]
+
+    a = sum(1 for x in today_signals if x.get("grade") == "A")
+    b = sum(1 for x in today_signals if x.get("grade") == "B")
+    c = sum(1 for x in today_signals if x.get("grade") == "C")
+
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"""
+📊 DAILY SUMMARY – BTC NDS PRO
+
+Date: {today}
+
+Signals:
+• Total: {len(today_signals)}
+• A: {a} | B: {b} | C: {c}
+
+Strong Moves (No Entry): {len(today_strong)}
+
+🕒 Generated at: {time_str()}
+"""
+    )
 
 # =========================
 # HEARTBEAT (ADMIN – 3H)
@@ -436,6 +480,7 @@ def main():
 
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
+    app.job_queue.run_daily(daily_summary, time=datetime.utcnow().replace(hour=20, minute=30, second=0))
 
     app.run_webhook(
         listen="0.0.0.0",
