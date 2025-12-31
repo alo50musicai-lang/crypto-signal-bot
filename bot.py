@@ -359,7 +359,18 @@ async def ath(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         r.raise_for_status()
         data = r.json()
-        ath_price = max(float(c[2]) for c in data)
+
+        ath_price = 0
+        ath_time = None
+
+        for c in data:
+            high = float(c[2])
+            if high > ath_price:
+                ath_price = high
+                ath_time = int(c[0])  # open time (ms)
+
+        ath_datetime = datetime.utcfromtimestamp(ath_time / 1000) + timedelta(hours=3, minutes=30)
+
     except:
         await update.message.reply_text("❌ خطا در دریافت ATH")
         return
@@ -369,7 +380,8 @@ async def ath(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🚀 BTC ALL TIME HIGH
 
 ATH: {ath_price:,.2f} USDT
-🕒 {time_str()}
+📅 Date: {ath_datetime.strftime('%Y-%m-%d')}
+🕒 Time (IR): {ath_datetime.strftime('%H:%M')}
 Source: MEXC
 """
     )
