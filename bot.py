@@ -1,9 +1,7 @@
 import os
 import json
-import threading
 import requests
 from datetime import date, datetime, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update
 from telegram.ext import (
@@ -25,6 +23,7 @@ LIMIT = 120
 MAX_SIGNALS_PER_DAY = 4
 MIN_PROFIT_USD = 700
 STRONG_MOVE_USD = 800
+
 # =========================
 # PERSISTENT FILES
 # =========================
@@ -105,7 +104,7 @@ def get_klines(interval):
 # =========================
 def compression(c):
     ranges = [(x["high"] - x["low"]) for x in c[-6:-1]]
-    return (c[-1]["high"] - c[-1]["low"]) < (sum(ranges)/len(ranges))*0.7
+    return (c[-1]["high"] - c[-1]["low"]) < (sum(ranges)/len(ranges)) * 0.7
 
 def early_bias(c):
     lows = [x["low"] for x in c[-4:]]
@@ -176,14 +175,13 @@ def can_send():
     return True
 
 # =========================
-# AUTO SIGNAL
+# AUTO SIGNAL (MERGED + STRONG MOVE)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     HTF = htf_bias()
     if HTF is None:
         return
 
-    bias_state = load_json(BIAS_STATE_FILE, {})
     logs = load_json(SIGNAL_LOG_FILE, [])
 
     for chat_id in VIP_USERS:
@@ -193,19 +191,54 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             bias = early_bias(c)
-            if not bias or bias != HTF:
+            if not bias:
                 continue
 
-                
+            move = abs(c[-1]["close"] - c[-2]["open"])
+            has_disp = displacement(c, bias)
+            has_liq = liquidity_sweep(c, bias)
+            fvg = detect_fvg(c, bias)
+
+            # ===== STRONG MOVE – NO ENTRY (ADMIN ONLY)
+            if (
+                ADMIN_ID
+                and has_disp
+                and move >= STRONG_MOVE_USD
+                and (bias != HTF or not has_liq or not fvg)
+            ):
+                reason = []
+                if bias != HTF:
+                    reason.append("HTF Mismatch")
+                if not has_liq:
+                    reason.append("No Liquidity")
+                if not fvg:
+                    reason.append("No FVG")
+
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"""
+⚠️ STRONG MOVE – NO ENTRY
+
+Direction: {bias}
+TF: {tf}
+Move: ~{int(move)} USDT
+Reason: {', '.join(reason)}
+🕒 {time_str()}
+"""
+                )
+
+            # ===== NORMAL SIGNAL (UNCHANGED)
+            if bias != HTF:
+                continue
             if not compression(c):
                 continue
-            if not liquidity_sweep(c, bias):
+            if not has_liq:
                 continue
-            if not displacement(c, bias):
+            if not has_disp:
                 continue
-
-            fvg = detect_fvg(c, bias)
             if not fvg:
+                continue
+            if not can_send():
                 continue
 
             entry = sum(fvg) / 2
@@ -221,7 +254,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                 title = "🔴🔴🔴 BTC SHORT – NDS PRO"
 
             potential = abs(tp - entry)
-            if potential < MIN_PROFIT_USD or not can_send():
+            if potential < MIN_PROFIT_USD:
                 continue
 
             conf = confidence_score(potential)
@@ -294,6 +327,7 @@ async def viplist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(str(update.effective_chat.id))
+
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         r = requests.get(
@@ -321,7 +355,6 @@ Source: MEXC
 """
     )
 
-
 async def high(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         r = requests.get(
@@ -346,7 +379,6 @@ Source: MEXC
 """
     )
 
-
 async def ath(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         r = requests.get(
@@ -368,7 +400,7 @@ async def ath(update: Update, context: ContextTypes.DEFAULT_TYPE):
             high = float(c[2])
             if high > ath_price:
                 ath_price = high
-                ath_time = int(c[0])  # open time (ms)
+                ath_time = int(c[0])
 
         ath_datetime = datetime.utcfromtimestamp(ath_time / 1000) + timedelta(hours=3, minutes=30)
 
@@ -386,6 +418,7 @@ ATH: {ath_price:,.2f} USDT
 Source: MEXC
 """
     )
+
 # =========================
 # MAIN
 # =========================
@@ -400,6 +433,7 @@ def main():
     app.add_handler(CommandHandler("price", price))
     app.add_handler(CommandHandler("high", high))
     app.add_handler(CommandHandler("ath", ath))
+
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
 
