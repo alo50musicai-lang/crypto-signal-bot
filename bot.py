@@ -31,12 +31,10 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 SYMBOL = "BTCUSDT"
 LIMIT = 120
-
 MAX_SIGNALS_PER_DAY = 4
 MIN_PROFIT_USD = 700
 
 signals_today = {}
-CHAT_ID = None
 
 # =========================
 # Persistent Files
@@ -50,8 +48,14 @@ VIP_USERS = set()
 ADMIN_ID = None
 
 # =========================
-# JSON Helpers
+# Helpers
 # =========================
+def iran_time():
+    return datetime.utcnow() + timedelta(hours=3, minutes=30)
+
+def time_str():
+    return iran_time().strftime("%Y-%m-%d | %H:%M")
+
 def load_json(path, default):
     if os.path.exists(path):
         try:
@@ -106,21 +110,21 @@ def get_klines(interval):
 # =========================
 # NDS CORE
 # =========================
-def compression(candles):
-    ranges = [(c["high"] - c["low"]) for c in candles[-6:-1]]
-    return (candles[-1]["high"] - candles[-1]["low"]) < (sum(ranges)/len(ranges))*0.7
+def compression(c):
+    ranges = [(x["high"] - x["low"]) for x in c[-6:-1]]
+    return (c[-1]["high"] - c[-1]["low"]) < (sum(ranges)/len(ranges))*0.7
 
-def early_bias(candles):
-    lows = [c["low"] for c in candles[-4:]]
-    highs = [c["high"] for c in candles[-4:]]
+def early_bias(c):
+    lows = [x["low"] for x in c[-4:]]
+    highs = [x["high"] for x in c[-4:]]
     if lows[-1] > lows[-2] > lows[-3]:
         return "LONG"
     if highs[-1] < highs[-2] < highs[-3]:
         return "SHORT"
     return None
 
-def displacement(candles, bias):
-    last, prev = candles[-1], candles[-2]
+def displacement(c, bias):
+    last, prev = c[-1], c[-2]
     body = abs(last["close"] - last["open"])
     full = last["high"] - last["low"]
     if full == 0:
@@ -136,39 +140,39 @@ def displacement(candles, bias):
 # PRO ADDITIONS
 # =========================
 def htf_bias():
-    candles = get_klines("4h")
-    if not candles:
+    c = get_klines("4h")
+    if not c:
         return None
-    return early_bias(candles)
+    return early_bias(c)
 
 def valid_session():
-    hour = (datetime.utcnow() + timedelta(hours=3, minutes=30)).hour
-    return (10 <= hour <= 14) or (16 <= hour <= 20)
+    h = iran_time().hour
+    return (10 <= h <= 14) or (16 <= h <= 20)
 
-def liquidity_sweep(candles, bias):
+def liquidity_sweep(c, bias):
     if bias == "LONG":
-        return candles[-1]["low"] < min(c["low"] for c in candles[-6:-1])
+        return c[-1]["low"] < min(x["low"] for x in c[-6:-1])
     if bias == "SHORT":
-        return candles[-1]["high"] > max(c["high"] for c in candles[-6:-1])
+        return c[-1]["high"] > max(x["high"] for x in c[-6:-1])
     return False
 
-def detect_fvg(candles, bias):
-    c1, _, c3 = candles[-3], candles[-2], candles[-1]
+def detect_fvg(c, bias):
+    c1, c3 = c[-3], c[-1]
     if bias == "LONG" and c1["high"] < c3["low"]:
         return (c1["high"], c3["low"])
     if bias == "SHORT" and c1["low"] > c3["high"]:
         return (c3["high"], c1["low"])
     return None
 
-def confidence_score(potential):
-    score = 25
-    if potential > 1000: score += 25
-    if potential > 1500: score += 25
-    if potential > 2000: score += 20
-    return min(score, 95)
+def confidence_score(p):
+    s = 25
+    if p > 1000: s += 25
+    if p > 1500: s += 25
+    if p > 2000: s += 20
+    return min(s, 95)
 
 # =========================
-# Signal Limit
+# Limits
 # =========================
 def can_send():
     today = date.today().isoformat()
@@ -190,32 +194,32 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     logs = load_json(SIGNAL_LOG_FILE, [])
 
     for chat_id in VIP_USERS:
-        for interval in ["15m", "30m", "1h"]:
-            candles = get_klines(interval)
-            if not candles or not valid_session():
+        for tf in ["15m", "30m", "1h"]:
+            c = get_klines(tf)
+            if not c or not valid_session():
                 continue
 
-            bias = early_bias(candles)
+            bias = early_bias(c)
             if not bias or bias != HTF:
                 continue
 
-            prev_bias = bias_state.get(interval)
-            if prev_bias and prev_bias != bias:
+            prev = bias_state.get(tf)
+            if prev and prev != bias:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"🔔 BIAS CHANGE\nTF:{interval}\n{prev_bias} ➜ {bias}"
+                    text=f"🔔 BIAS CHANGE\nTF:{tf}\n{prev} ➜ {bias}\n🕒 {time_str()}"
                 )
-            bias_state[interval] = bias
+            bias_state[tf] = bias
             save_json(BIAS_STATE_FILE, bias_state)
 
-            if not compression(candles):
+            if not compression(c):
                 continue
-            if not liquidity_sweep(candles, bias):
+            if not liquidity_sweep(c, bias):
                 continue
-            if not displacement(candles, bias):
+            if not displacement(c, bias):
                 continue
 
-            fvg = detect_fvg(candles, bias)
+            fvg = detect_fvg(c, bias)
             if not fvg:
                 continue
 
@@ -235,31 +239,39 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             if potential < MIN_PROFIT_USD or not can_send():
                 continue
 
-            confidence = confidence_score(potential)
-            grade = "A" if confidence >= 80 else "B" if confidence >= 60 else "C"
+            conf = confidence_score(potential)
+            grade = "A" if conf >= 80 else "B" if conf >= 60 else "C"
 
-            logs.append({"tf": interval, "bias": bias, "entry": entry})
+            logs.append({"time": time_str(), "tf": tf, "bias": bias, "entry": entry})
             save_json(SIGNAL_LOG_FILE, logs[-200:])
-
-            iran_time = (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%Y-%m-%d | %H:%M")
 
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"""
 {title}
 
-TF: {interval}
-🕒 {iran_time}
+TF: {tf}
+🕒 {time_str()}
 
 Entry: {entry:.2f}
 SL: {sl:.2f}
 TP: {tp:.2f}
 
-Confidence: {confidence}%
+Confidence: {conf}%
 Grade: {grade}
 ⚠️ تصمیم نهایی با شما
 """
             )
+
+# =========================
+# HEARTBEAT (ADMIN – 3h)
+# =========================
+async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_ID:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"🟢 BOT ALIVE – NDS PRO\n🕒 {time_str()}\nStatus: Running"
+        )
 
 # =========================
 # Commands
@@ -303,16 +315,20 @@ async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 def main():
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(CommandHandler("viplist", viplist))
     app.add_handler(CommandHandler("id", show_id))
+
     app.job_queue.run_repeating(auto_signal, interval=180, first=20)
+    app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
+
     app.run_polling()
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({"time": datetime.utcnow().isoformat()})
+    restarts.append({"time": time_str()})
     save_json(RESTART_LOG_FILE, restarts[-50:])
     main()
