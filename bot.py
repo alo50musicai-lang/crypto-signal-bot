@@ -322,7 +322,6 @@ def main():
     app.add_handler(CommandHandler("viplist", viplist))
     app.add_handler(CommandHandler("id", show_id))
     app.add_handler(CommandHandler("price", price))
-
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
 
