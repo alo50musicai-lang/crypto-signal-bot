@@ -24,7 +24,7 @@ SYMBOL = "BTCUSDT"
 LIMIT = 120
 MAX_SIGNALS_PER_DAY = 4
 MIN_PROFIT_USD = 700
-
+STRONG_MOVE_USD = 800
 # =========================
 # PERSISTENT FILES
 # =========================
@@ -195,7 +195,37 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             bias = early_bias(c)
             if not bias or bias != HTF:
                 continue
+move = abs(c[-1]["close"] - c[-2]["open"])
 
+has_disp = displacement(c, bias)
+has_liq = liquidity_sweep(c, bias)
+fvg = detect_fvg(c, bias)
+
+# ===== STRONG MOVE – NO ENTRY (ADMIN ONLY)
+if (
+    ADMIN_ID
+    and has_disp
+    and move >= STRONG_MOVE_USD
+    and (not has_liq or not fvg)
+):
+    reason = []
+    if not has_liq:
+        reason.append("No Liquidity")
+    if not fvg:
+        reason.append("No FVG")
+
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"""
+⚠️ STRONG MOVE – NO ENTRY
+
+Direction: {bias}
+TF: {tf}
+Move: ~{int(move)} USDT
+Reason: {', '.join(reason)}
+🕒 {time_str()}
+"""
+    )
             if not compression(c):
                 continue
             if not liquidity_sweep(c, bias):
