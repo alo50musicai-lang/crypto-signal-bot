@@ -229,7 +229,6 @@ Reason: {', '.join(reason)}
     )
 # ===== END STRONG MOVE =====
                 
-                
             if not compression(c):
                 continue
             if not liquidity_sweep(c, bias):
