@@ -294,18 +294,81 @@ async def viplist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(str(update.effective_chat.id))
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    candles = get_klines("1m")
-    if not candles:
+    try:
+        r = requests.get(
+            "https://api.mexc.com/api/v3/ticker/24hr",
+            params={"symbol": "BTCUSDT"},
+            timeout=10
+        )
+        r.raise_for_status()
+        d = r.json()
+        price = float(d["lastPrice"])
+        change = float(d["priceChangePercent"])
+    except:
         await update.message.reply_text("❌ خطا در دریافت قیمت")
         return
 
-    last_price = candles[-1]["close"]
-
+    sign = "🟢 +" if change >= 0 else "🔴 "
     await update.message.reply_text(
         f"""
 💰 BTC LIVE PRICE
 
-Price: {last_price:.2f} USDT
+Price: {price:,.2f} USDT
+24h Change: {sign}{change:.2f}%
+🕒 {time_str()}
+Source: MEXC
+"""
+    )
+
+
+async def high(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        r = requests.get(
+            "https://api.mexc.com/api/v3/ticker/24hr",
+            params={"symbol": "BTCUSDT"},
+            timeout=10
+        )
+        r.raise_for_status()
+        d = r.json()
+        high_price = float(d["highPrice"])
+    except:
+        await update.message.reply_text("❌ خطا در دریافت High")
+        return
+
+    await update.message.reply_text(
+        f"""
+📈 BTC DAILY HIGH
+
+High Today: {high_price:,.2f} USDT
+🕒 {time_str()}
+Source: MEXC
+"""
+    )
+
+
+async def ath(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        r = requests.get(
+            "https://api.mexc.com/api/v3/klines",
+            params={
+                "symbol": "BTCUSDT",
+                "interval": "1d",
+                "limit": 1000
+            },
+            timeout=15
+        )
+        r.raise_for_status()
+        data = r.json()
+        ath_price = max(float(c[2]) for c in data)
+    except:
+        await update.message.reply_text("❌ خطا در دریافت ATH")
+        return
+
+    await update.message.reply_text(
+        f"""
+🚀 BTC ALL TIME HIGH
+
+ATH: {ath_price:,.2f} USDT
 🕒 {time_str()}
 Source: MEXC
 """
@@ -322,6 +385,8 @@ def main():
     app.add_handler(CommandHandler("viplist", viplist))
     app.add_handler(CommandHandler("id", show_id))
     app.add_handler(CommandHandler("price", price))
+    app.add_handler(CommandHandler("high", high))
+    app.add_handler(CommandHandler("ath", ath))
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
 
