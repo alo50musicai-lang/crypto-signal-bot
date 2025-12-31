@@ -228,7 +228,6 @@ Reason: {', '.join(reason)}
 """
     )
     
-    
             if not compression(c):
                 continue
             if not liquidity_sweep(c, bias):
