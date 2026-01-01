@@ -330,6 +330,41 @@ Strong Moves (No Entry): {len(today_strong)}
     )
 
 # =========================
+# DAILY SUMMARY (MANUAL)
+# =========================
+async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ فقط ادمین")
+        return
+
+    today = today_str()
+    logs = load_json(SIGNAL_LOG_FILE, [])
+    strong_logs = load_json(STRONG_MOVE_LOG_FILE, [])
+
+    today_signals = [x for x in logs if x.get("date") == today]
+    today_strong = [x for x in strong_logs if x.get("date") == today]
+
+    a = sum(1 for x in today_signals if x.get("grade") == "A")
+    b = sum(1 for x in today_signals if x.get("grade") == "B")
+    c = sum(1 for x in today_signals if x.get("grade") == "C")
+
+    await update.message.reply_text(
+        f"""
+📊 DAILY SUMMARY – BTC NDS PRO (Manual)
+
+Date: {today}
+
+Signals:
+• Total: {len(today_signals)}
+• A: {a} | B: {b} | C: {c}
+
+Strong Moves (No Entry): {len(today_strong)}
+
+🕒 Generated at: {time_str()}
+"""
+    )
+
+# =========================
 # HEARTBEAT (ADMIN – 3H)
 # =========================
 async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
