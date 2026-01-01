@@ -304,6 +304,10 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     today_signals = [x for x in logs if x.get("date") == today]
     today_strong = [x for x in strong_logs if x.get("date") == today]
 
+    # ⬅️ اگر هیچ اتفاقی نبوده، اتومات نیاید
+    if len(today_signals) == 0 and len(today_strong) == 0:
+        return
+
     a = sum(1 for x in today_signals if x.get("grade") == "A")
     b = sum(1 for x in today_signals if x.get("grade") == "B")
     c = sum(1 for x in today_signals if x.get("grade") == "C")
