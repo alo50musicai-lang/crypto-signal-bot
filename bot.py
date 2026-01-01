@@ -481,7 +481,8 @@ def main():
     app.add_handler(CommandHandler("price", price))
     app.add_handler(CommandHandler("high", high))
     app.add_handler(CommandHandler("ath", ath))
-
+    app.add_handler(CommandHandler("summary", summary))
+    
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
     app.job_queue.run_daily(daily_summary, time=datetime.utcnow().replace(hour=20, minute=30, second=0))
