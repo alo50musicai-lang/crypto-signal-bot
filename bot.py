@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG
+# CONFIG - V3.3 OPTIMIZED
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -20,12 +20,12 @@ WEBHOOK_PATH = f"/{TOKEN}"
 
 SYMBOL = "BTCUSDT"
 LIMIT = 120
-MAX_SIGNALS_PER_DAY = 3
-MIN_PROFIT_USD = 700
+MAX_SIGNALS_PER_DAY = 5
+MIN_PROFIT_USD = 500
 STRONG_MOVE_USD = 800
 
 RSI_PERIOD = 14
-VOLUME_MULTIPLIER = 1.5
+VOLUME_MULTIPLIER = 1.3
 ATR_PERIOD = 14
 ADX_PERIOD = 14
 FUNDING_THRESHOLD = 0.01
@@ -323,12 +323,12 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         if bias == "LONG":
             sl = fvg[0] - risk * 0.2
             tp = entry + risk * 3
-            title = "🟢🟢🟢 BTC LONG – NDS PRO V3.2"
+            title = "🟢🟢🟢 BTC LONG – NDS PRO V3.3"
             safe_lev = SAFE_LEVERAGE_LONG
         else:
             sl = fvg[1] + risk * 0.2
             tp = entry - risk * 3
-            title = "🔴🔴🔴 BTC SHORT – NDS PRO V3.2"
+            title = "🔴🔴🔴 BTC SHORT – NDS PRO V3.3"
             safe_lev = SAFE_LEVERAGE_SHORT
 
         potential = abs(tp - entry)
@@ -392,7 +392,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V3.2
+📊 DAILY SUMMARY – BTC NDS PRO V3.3
 
 Date: {today}
 
@@ -420,7 +420,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     b = sum(1 for x in today_signals if x.get("grade") == "B")
     c = sum(1 for x in today_signals if x.get("grade") == "C")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V3.2 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V3.3 (Manual)
 
 Date: {today}
 
@@ -440,7 +440,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V3.2\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V3.3\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
