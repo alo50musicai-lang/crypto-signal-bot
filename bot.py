@@ -20,9 +20,12 @@ WEBHOOK_PATH = f"/{TOKEN}"
 
 SYMBOL = "BTCUSDT"
 LIMIT = 120
-MAX_SIGNALS_PER_DAY = 4
+MAX_SIGNALS_PER_DAY = 3  # OPTIMIZED: Reduced to 3 for higher quality
 MIN_PROFIT_USD = 700
 STRONG_MOVE_USD = 800
+RSI_PERIOD = 14  # OPTIMIZED: For RSI filter
+VOLUME_MULTIPLIER = 1.5  # OPTIMIZED: Volume > avg * this
+ATR_PERIOD = 14  # OPTIMIZED: For dynamic SL/TP
 
 # =========================
 # PERSISTENT FILES
@@ -98,7 +101,8 @@ def get_klines(interval):
             "open": float(k[1]),
             "high": float(k[2]),
             "low": float(k[3]),
-            "close": float(k[4])
+            "close": float(k[4]),
+            "volume": float(k[5])  # OPTIMIZED: Added volume
         } for k in data]
     except:
         return None
@@ -160,8 +164,34 @@ def detect_fvg(c, bias):
         return (c3["high"], c1["low"])
     return None
 
-def confidence_score(p):
-    s = 25
+# OPTIMIZED: New filters
+def calculate_rsi(c, period=RSI_PERIOD):
+    closes = [x["close"] for x in c]
+    delta = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gain = [d if d > 0 else 0 for d in delta]
+    loss = [-d if d < 0 else 0 for d in delta]
+    avg_gain = sum(gain[-period:]) / period
+    avg_loss = sum(loss[-period:]) / period
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def volume_filter(c):
+    volumes = [x["volume"] for x in c[-21:-1]]  # 20 previous
+    avg_vol = sum(volumes) / len(volumes) if volumes else 0
+    return c[-1]["volume"] > avg_vol * VOLUME_MULTIPLIER
+
+def calculate_atr(c, period=ATR_PERIOD):
+    trs = []
+    for i in range(1, len(c)):
+        tr = max(c[i]["high"] - c[i]["low"], abs(c[i]["high"] - c[i-1]["close"]), abs(c[i]["low"] - c[i-1]["close"]))
+        trs.append(tr)
+    avg_tr = sum(trs[-period:]) / period if len(trs) >= period else 0
+    return avg_tr
+
+def confidence_score(p, rsi_conf=0):
+    s = 25 + rsi_conf  # OPTIMIZED: Add RSI to score
     if p > 1000: s += 25
     if p > 1500: s += 25
     if p > 2000: s += 20
@@ -204,6 +234,14 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             has_liq = liquidity_sweep(c, bias)
             fvg = detect_fvg(c, bias)
 
+            # OPTIMIZED: New checks
+            rsi = calculate_rsi(c)
+            rsi_conf = 10 if (bias == "LONG" and rsi > 55) or (bias == "SHORT" and rsi < 45) else 0
+            if rsi_conf == 0 or not volume_filter(c):
+                continue  # Skip if no RSI/volume confirm
+
+            atr = calculate_atr(c)
+
             if (
                 ADMIN_ID
                 and has_disp
@@ -243,22 +281,22 @@ Move: ~{int(move)} USDT
                 continue
 
             entry = sum(fvg) / 2
-            risk = abs(fvg[1] - fvg[0])
+            risk = abs(fvg[1] - fvg[0]) + atr * 0.5  # OPTIMIZED: Add ATR to risk
 
             if bias == "LONG":
                 sl = fvg[0] - risk * 0.2
                 tp = entry + risk * 3
-                title = "🟢🟢🟢 BTC LONG – NDS PRO"
+                title = "🟢🟢🟢 BTC LONG – NDS PRO V2"
             else:
                 sl = fvg[1] + risk * 0.2
                 tp = entry - risk * 3
-                title = "🔴🔴🔴 BTC SHORT – NDS PRO"
+                title = "🔴🔴🔴 BTC SHORT – NDS PRO V2"
 
             potential = abs(tp - entry)
             if potential < MIN_PROFIT_USD:
                 continue
 
-            conf = confidence_score(potential)
+            conf = confidence_score(potential, rsi_conf)
             grade = "A" if conf >= 80 else "B" if conf >= 60 else "C"
 
             logs.append({
@@ -304,7 +342,6 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     today_signals = [x for x in logs if x.get("date") == today]
     today_strong = [x for x in strong_logs if x.get("date") == today]
 
-    # ⬅️ اگر هیچ اتفاقی نبوده، اتومات نیاید
     if len(today_signals) == 0 and len(today_strong) == 0:
         return
 
@@ -315,7 +352,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO
+📊 DAILY SUMMARY – BTC NDS PRO V2
 
 Date: {today}
 
@@ -350,7 +387,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"""
-📊 DAILY SUMMARY – BTC NDS PRO (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V2 (Manual)
 
 Date: {today}
 
@@ -371,7 +408,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V2\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
