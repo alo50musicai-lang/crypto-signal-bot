@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG - V3.3 OPTIMIZED
+# CONFIG - V4 WITH GRADE D
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -20,12 +20,11 @@ WEBHOOK_PATH = f"/{TOKEN}"
 
 SYMBOL = "BTCUSDT"
 LIMIT = 120
-MAX_SIGNALS_PER_DAY = 5
-MIN_PROFIT_USD = 200
-STRONG_MOVE_USD = 800
+MAX_SIGNALS_PER_DAY = 5  # افزایش برای جا دادن C/D
+MIN_PROFIT_USD = 100     # کاهش برای سیگنال C/D
 
 RSI_PERIOD = 14
-VOLUME_MULTIPLIER = 1.3
+VOLUME_MULTIPLIER = 1.0  # شل‌تر برای C/D
 ATR_PERIOD = 14
 ADX_PERIOD = 14
 FUNDING_THRESHOLD = 0.01
@@ -34,6 +33,9 @@ DEFAULT_CAPITAL = 10000
 RISK_PERCENT = 0.01
 SAFE_LEVERAGE_LONG = 5
 SAFE_LEVERAGE_SHORT = 3
+
+STRENGTH_THRESHOLD_A = 0.55  # برای A/B
+STRENGTH_THRESHOLD_C = 0.4   # برای C/D (شل‌تر)
 
 # =========================
 # PERSISTENT FILES
@@ -145,12 +147,13 @@ def calculate_rsi(c, period=RSI_PERIOD):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def volume_filter(c):
+def volume_filter(c, is_weak=False):
     volumes = [x["volume"] for x in c[-21:-1]]
     if not volumes:
         return False
     avg_vol = sum(volumes) / len(volumes)
-    return c[-1]["volume"] > avg_vol * VOLUME_MULTIPLIER
+    multiplier = 1.0 if is_weak else VOLUME_MULTIPLIER
+    return c[-1]["volume"] > avg_vol * multiplier
 
 def calculate_atr(c, period=ATR_PERIOD):
     if len(c) < period + 1:
@@ -165,7 +168,7 @@ def calculate_atr(c, period=ATR_PERIOD):
         trs.append(tr)
     return sum(trs[-period:]) / period
 
-def calculate_adx(c, period=ADX_PERIOD):
+def calculate_adx(c, period=ADX_PERIOD, is_weak=False):
     if len(c) < period + 2:
         return 0
     plus_di = []
@@ -183,7 +186,8 @@ def calculate_adx(c, period=ADX_PERIOD):
     plus_di_avg = sum(plus_di[-period:]) / period / atr * 100
     minus_di_avg = sum(minus_di[-period:]) / period / atr * 100
     dx = abs(plus_di_avg - minus_di_avg) / (plus_di_avg + minus_di_avg + 1e-8) * 100
-    return dx
+    threshold = 15 if is_weak else 25  # شل‌تر برای C/D
+    return dx > threshold
 
 # =========================
 # PRO ADDITIONS
@@ -198,19 +202,26 @@ def valid_session():
     h = iran_time().hour
     return (10 <= h <= 14) or (16 <= h <= 20)
 
-def liquidity_sweep(c, bias):
+def liquidity_sweep(c, bias, is_weak=False):
     if bias == "LONG":
-        return c[-1]["low"] < min(x["low"] for x in c[-6:-1])
+        min_low = min(x["low"] for x in c[-6:-1])
+        return c[-1]["low"] < min_low if not is_weak else c[-1]["low"] < min_low * 1.01
     if bias == "SHORT":
-        return c[-1]["high"] > max(x["high"] for x in c[-6:-1])
+        max_high = max(x["high"] for x in c[-6:-1])
+        return c[-1]["high"] > max_high if not is_weak else c[-1]["high"] > max_high * 0.99
     return False
 
-def detect_fvg(c, bias):
+def detect_fvg(c, bias, is_weak=False):
     c1, c3 = c[-3], c[-1]
     if bias == "LONG" and c1["high"] < c3["low"]:
         return (c1["high"], c3["low"])
     if bias == "SHORT" and c1["low"] > c3["high"]:
         return (c3["high"], c1["low"])
+    if is_weak:
+        if bias == "LONG" and c1["high"] < c3["low"] * 1.01:
+            return (c1["high"], c3["low"] * 1.01)
+        if bias == "SHORT" and c1["low"] > c3["high"] * 0.99:
+            return (c3["high"] * 0.99, c1["low"])
     return None
 
 def confidence_score(potential, rsi_conf=0):
@@ -223,12 +234,13 @@ def confidence_score(potential, rsi_conf=0):
 # =========================
 # NDS CORE
 # =========================
-def compression(c):
+def compression(c, is_weak=False):
     ranges = [(x["high"] - x["low"]) for x in c[-6:-1]]
     if not ranges:
         return False
     avg_range = sum(ranges) / len(ranges)
-    return (c[-1]["high"] - c[-1]["low"]) < avg_range * 0.7
+    threshold = 0.85 if is_weak else 0.7
+    return (c[-1]["high"] - c[-1]["low"]) < avg_range * threshold
 
 def early_bias(c):
     lows = [x["low"] for x in c[-4:]]
@@ -239,16 +251,17 @@ def early_bias(c):
         return "SHORT"
     return None
 
-def displacement(c, bias):
+def displacement(c, bias, is_weak=False):
     last, prev = c[-1], c[-2]
     body = abs(last["close"] - last["open"])
     full = last["high"] - last["low"]
     if full == 0:
         return False
     strength = body / full
-    if bias == "LONG" and last["close"] > prev["high"] and strength > 0.55:
+    threshold = STRENGTH_THRESHOLD_C if is_weak else STRENGTH_THRESHOLD_A
+    if bias == "LONG" and last["close"] > prev["high"] and strength > threshold:
         return True
-    if bias == "SHORT" and last["close"] < prev["low"] and strength > 0.55:
+    if bias == "SHORT" and last["close"] < prev["low"] and strength > threshold:
         return True
     return False
 
@@ -288,21 +301,31 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         rsi = calculate_rsi(c)
-        rsi_conf = 10 if (bias == "LONG" and rsi > 55) or (bias == "SHORT" and rsi < 45) else 0
-        if rsi_conf == 0:
-            continue
-        if not volume_filter(c):
-            continue
-        if not compression(c):
-            continue
-        if calculate_adx(c) < 25:
-            continue
+        rsi_conf = 10 if (bias == "LONG" and rsi > 55) or (bias == "SHORT" and rsi < 45) else 5 if (bias == "LONG" and rsi > 45) or (bias == "SHORT" and rsi < 55) else 0  # partial برای C/D
 
-        has_disp = displacement(c, bias)
-        has_liq = liquidity_sweep(c, bias)
-        fvg = detect_fvg(c, bias)
-        if not has_disp or not has_liq or not fvg:
-            continue
+        # چک قوی برای A/B
+        has_disp = displacement(c, bias, is_weak=False)
+        has_liq = liquidity_sweep(c, bias, is_weak=False)
+        has_comp = compression(c, is_weak=False)
+        fvg = detect_fvg(c, bias, is_weak=False)
+        has_vol = volume_filter(c, is_weak=False)
+        has_adx = calculate_adx(c) > 25
+
+        if has_disp and has_liq and has_comp and fvg and has_vol and has_adx and rsi_conf > 0:
+            grade_level = "strong"
+        else:
+            # چک ضعیف برای C/D
+            has_disp_weak = displacement(c, bias, is_weak=True)
+            has_liq_weak = liquidity_sweep(c, bias, is_weak=True)
+            has_comp_weak = compression(c, is_weak=True)
+            fvg_weak = detect_fvg(c, bias, is_weak=True)
+            has_vol_weak = volume_filter(c, is_weak=True)
+            has_adx_weak = calculate_adx(c) > 15
+
+            if has_disp_weak and has_liq_weak and has_comp_weak and fvg_weak and has_vol_weak and has_adx_weak:
+                grade_level = "weak"
+            else:
+                continue
 
         move = abs(c[-1]["close"] - c[-2]["open"])
         if move >= STRONG_MOVE_USD and ADMIN_ID:
@@ -316,6 +339,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         if not can_send():
             continue
 
+        fvg = fvg if grade_level == "strong" else fvg_weak  # استفاده از fvg ضعیف برای C/D
         entry = sum(fvg) / 2
         atr = calculate_atr(c)
         risk = abs(fvg[1] - fvg[0]) + atr * 0.5
@@ -323,12 +347,12 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         if bias == "LONG":
             sl = fvg[0] - risk * 0.2
             tp = entry + risk * 3
-            title = "🟢🟢🟢 BTC LONG – NDS PRO V3.3"
+            title = "🟢🟢🟢 BTC LONG – NDS PRO V4"
             safe_lev = SAFE_LEVERAGE_LONG
         else:
             sl = fvg[1] + risk * 0.2
             tp = entry - risk * 3
-            title = "🔴🔴🔴 BTC SHORT – NDS PRO V3.3"
+            title = "🔴🔴🔴 BTC SHORT – NDS PRO V4"
             safe_lev = SAFE_LEVERAGE_SHORT
 
         potential = abs(tp - entry)
@@ -339,7 +363,9 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         position_size_btc = risk_usd / abs(entry - sl) if abs(entry - sl) > 0 else 0
 
         conf = confidence_score(potential, rsi_conf)
-        grade = "A" if conf >= 80 else "B" if conf >= 60 else "C"
+        grade = "A" if conf >= 80 else "B" if conf >= 60 else "C" if conf >= 40 else "D"
+
+        warning = "" if grade in ["A", "B"] else "این حرکت ضعیفه و احتمال fake بالا—با احتیاط یا skip کن!"
 
         logs.append({"date": today_str(), "grade": grade})
         save_json(SIGNAL_LOG_FILE, logs[-500:])
@@ -365,6 +391,7 @@ Open Interest: {oi:,.0f}
 
 Confidence: {conf}%
 Grade: {grade}
+{warning}
 
 ⚠️ تصمیم نهایی با شماست
 """
@@ -383,22 +410,22 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     strong_logs = load_json(STRONG_MOVE_LOG_FILE, [])
     today_signals = [x for x in logs if x.get("date") == today]
     today_strong = [x for x in strong_logs if x.get("date") == today]
-    # فقط اگر چیزی باشه بیاد (مثل V2)
     if len(today_signals) == 0 and len(today_strong) == 0:
         return
     a = sum(1 for x in today_signals if x.get("grade") == "A")
     b = sum(1 for x in today_signals if x.get("grade") == "B")
     c = sum(1 for x in today_signals if x.get("grade") == "C")
+    d = sum(1 for x in today_signals if x.get("grade") == "D")
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V3.3
+📊 DAILY SUMMARY – BTC NDS PRO V4
 
 Date: {today}
 
 Signals:
 • Total: {len(today_signals)}
-• A: {a} | B: {b} | C: {c}
+• A: {a} | B: {b} | C: {c} | D: {d}
 
 Strong Moves (No Entry): {len(today_strong)}
 
@@ -410,7 +437,6 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
         await update.message.reply_text("❌ فقط ادمین")
         return
-    # دستی همیشه میاد، حتی اگر صفر باشه
     today = today_str()
     logs = load_json(SIGNAL_LOG_FILE, [])
     strong_logs = load_json(STRONG_MOVE_LOG_FILE, [])
@@ -419,14 +445,15 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     a = sum(1 for x in today_signals if x.get("grade") == "A")
     b = sum(1 for x in today_signals if x.get("grade") == "B")
     c = sum(1 for x in today_signals if x.get("grade") == "C")
+    d = sum(1 for x in today_signals if x.get("grade") == "D")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V3.3 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V4 (Manual)
 
 Date: {today}
 
 Signals:
 • Total: {len(today_signals)}
-• A: {a} | B: {b} | C: {c}
+• A: {a} | B: {b} | C: {c} | D: {d}
 
 Strong Moves (No Entry): {len(today_strong)}
 
@@ -440,7 +467,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V3.3\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V4\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
