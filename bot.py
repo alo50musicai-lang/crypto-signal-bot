@@ -1,7 +1,7 @@
 import os
 import json
 import requests
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 
 from telegram import Update
 from telegram.ext import (
@@ -11,23 +11,27 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG - V7 FINAL WITH FULL ADX & ADVANCED BACKTEST
+# CONFIG - V7.1 STABLE
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-WEBHOOK_URL = "https://crypto-signal-bot-1-wpdw.onrender.com"
-WEBHOOK_PATH = f"/{TOKEN}"
+# امنیت: مسیر وبهوک را از توکن جدا نگه می‌داریم
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-render-service.onrender.com")
+WEBHOOK_PATH = "/webhook"
 
 SYMBOL = "BTCUSDT"
-LIMIT = 120
+LIMIT = 200  # داده‌ی بیشتر برای اندیکاتورها
 MAX_SIGNALS_PER_DAY = 15
 MIN_PROFIT_USD = 50
 
 RSI_PERIOD = 14
-VOLUME_MULTIPLIER = 0.8
+VOLUME_MULTIPLIER = 0.9
 ATR_PERIOD = 14
 ADX_PERIOD = 14
-FUNDING_THRESHOLD = 0.05
+
+# Funding در اکثر صرافی‌ها بسیار کوچک است (0.01% ~ 0.0001)
+# اگر API مقدار را به اعشار می‌دهد، آستانه‌ی منطقی 0.001–0.003 است
+FUNDING_THRESHOLD = 0.003
 
 DEFAULT_CAPITAL = 10000
 RISK_PERCENT = 0.01
@@ -37,7 +41,10 @@ SAFE_LEVERAGE_SHORT = 3
 STRENGTH_THRESHOLD_A = 0.55
 STRENGTH_THRESHOLD_B = 0.45
 STRENGTH_THRESHOLD_C = 0.35
-STRENGTH_THRESHOLD_D = 0.3
+STRENGTH_THRESHOLD_D = 0.30
+
+# حرکت خیلی قوی بدون ورود
+STRONG_MOVE_USD = 200
 
 # =========================
 # PERSISTENT FILES
@@ -47,13 +54,13 @@ SIGNAL_LOG_FILE = "signal_log.json"
 STRONG_MOVE_LOG_FILE = "strong_move_log.json"
 RESTART_LOG_FILE = "restart_log.json"
 VIP_FILE = "vip_users.json"
+LIMIT_FILE = "limit_state.json"
 
 VIP_USERS = set()
 ADMIN_ID = None
-signals_today = {}
 
 # =========================
-# TIME
+# TIME (IRAN)
 # =========================
 def iran_time():
     return datetime.utcnow() + timedelta(hours=3, minutes=30)
@@ -72,30 +79,47 @@ def load_json(path, default):
         try:
             with open(path, "r") as f:
                 return json.load(f)
-        except:
+        except Exception:
             return default
     return default
 
 def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
 # =========================
 # VIP
 # =========================
 def load_vips():
     global VIP_USERS, ADMIN_ID
-    if os.path.exists(VIP_FILE):
-        with open(VIP_FILE, "r") as f:
-            data = json.load(f)
-            VIP_USERS = set(data.get("vips", []))
-            ADMIN_ID = data.get("admin")
+    data = load_json(VIP_FILE, {"admin": None, "vips": []})
+    VIP_USERS = set(data.get("vips", []))
+    ADMIN_ID = data.get("admin")
 
 def save_vips():
-    with open(VIP_FILE, "w") as f:
-        json.dump({"admin": ADMIN_ID, "vips": list(VIP_USERS)}, f)
+    save_json(VIP_FILE, {"admin": ADMIN_ID, "vips": list(VIP_USERS)})
 
 load_vips()
+
+# =========================
+# LIMIT (PERSISTENT)
+# =========================
+def get_limit_state():
+    return load_json(LIMIT_FILE, {"date": today_str(), "count": 0})
+
+def can_send():
+    state = get_limit_state()
+    if state["date"] != today_str():
+        state = {"date": today_str(), "count": 0}
+    if state["count"] >= MAX_SIGNALS_PER_DAY:
+        save_json(LIMIT_FILE, state)
+        return False
+    state["count"] += 1
+    save_json(LIMIT_FILE, state)
+    return True
 
 # =========================
 # MARKET DATA
@@ -109,52 +133,61 @@ def get_klines(interval):
         )
         r.raise_for_status()
         data = r.json()
-        return [{
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5])
-        } for k in data]
-    except:
+        candles = []
+        for k in data:
+            candles.append({
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+                "volume": float(k[5])
+            })
+        return candles
+    except requests.exceptions.RequestException:
+        return None
+    except (ValueError, KeyError, TypeError):
         return None
 
 def get_funding_and_oi():
     try:
         r = requests.get("https://api.mexc.com/api/v3/premiumIndex", params={"symbol": SYMBOL}, timeout=10)
         r.raise_for_status()
-        funding = float(r.json()["fundingRate"])
+        funding_raw = r.json().get("fundingRate")
+        funding = float(funding_raw)
 
         r_oi = requests.get("https://api.mexc.com/api/v3/openInterest", params={"symbol": SYMBOL}, timeout=10)
         r_oi.raise_for_status()
-        oi = float(r_oi.json()["openInterestValue"])
+        oi_raw = r_oi.json().get("openInterestValue")
+        oi = float(oi_raw)
         return funding, oi
-    except:
+    except requests.exceptions.RequestException:
+        return None, None
+    except (ValueError, KeyError, TypeError):
         return None, None
 
 # =========================
-# INDICATORS - FULL ADX WITH WILDER SMOOTHING
+# INDICATORS - RSI / ATR / ADX
 # =========================
 def calculate_rsi(c, period=RSI_PERIOD):
     closes = [x["close"] for x in c]
     if len(closes) < period + 1:
         return 50
     delta = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    gain = [d if d > 0 else 0 for d in delta]
-    loss = [-d if d < 0 else 0 for d in delta]
-    avg_gain = sum(gain[-period:]) / period
-    avg_loss = sum(loss[-period:]) / period
+    gains = [d if d > 0 else 0 for d in delta]
+    losses = [-d if d < 0 else 0 for d in delta]
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
     if avg_loss == 0:
         return 100
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 def volume_filter(c, grade_level="A"):
-    volumes = [x["volume"] for x in c[-21:-1]]
-    if not volumes:
+    vols = [x["volume"] for x in c[-21:-1]]
+    if not vols:
         return False
-    avg_vol = sum(volumes) / len(volumes)
-    multiplier = 0.8 if grade_level in ["C", "D"] else 1.0 if grade_level == "B" else VOLUME_MULTIPLIER
+    avg_vol = sum(vols) / len(vols)
+    multiplier = 0.85 if grade_level in ["C", "D"] else 1.0 if grade_level == "B" else VOLUME_MULTIPLIER
     return c[-1]["volume"] > avg_vol * multiplier
 
 def calculate_atr(c, period=ATR_PERIOD):
@@ -173,7 +206,6 @@ def calculate_atr(c, period=ATR_PERIOD):
 def calculate_adx(c, period=ADX_PERIOD):
     if len(c) < period + 20:
         return 0
-    # True Range
     tr_list = []
     for i in range(1, len(c)):
         tr = max(
@@ -183,7 +215,6 @@ def calculate_adx(c, period=ADX_PERIOD):
         )
         tr_list.append(tr)
 
-    # +DM and -DM
     plus_dm = []
     minus_dm = []
     for i in range(1, len(c)):
@@ -192,47 +223,44 @@ def calculate_adx(c, period=ADX_PERIOD):
         plus_dm.append(up if up > down and up > 0 else 0)
         minus_dm.append(down if down > up and down > 0 else 0)
 
-    # Wilder smoothing for ATR
     atr = tr_list[period-1]
     atr_list = [atr]
     for i in range(period, len(tr_list)):
         atr = (atr * (period - 1) + tr_list[i]) / period
         atr_list.append(atr)
 
-    # +DI and -DI
-    plus_di = [100 * plus_dm[period-1] / atr_list[0]]
-    minus_di = [100 * minus_dm[period-1] / atr_list[0]]
+    plus_di = [100 * plus_dm[period-1] / atr_list[0] if atr_list[0] > 0 else 0]
+    minus_di = [100 * minus_dm[period-1] / atr_list[0] if atr_list[0] > 0 else 0]
     for i in range(period, len(plus_dm)):
-        current_plus_di = 100 * ((plus_di[-1] * (period - 1) + plus_dm[i]) / period) / atr_list[i-period+1]
-        current_minus_di = 100 * ((minus_di[-1] * (period - 1) + minus_dm[i]) / period) / atr_list[i-period+1]
-        plus_di.append(current_plus_di)
-        minus_di.append(current_minus_di)
+        denom = atr_list[i - period + 1]
+        pdi = 100 * ((plus_di[-1] * (period - 1) + plus_dm[i]) / period) / denom if denom > 0 else 0
+        mdi = 100 * ((minus_di[-1] * (period - 1) + minus_dm[i]) / period) / denom if denom > 0 else 0
+        plus_di.append(pdi)
+        minus_di.append(mdi)
 
-    # DX
     dx_list = []
     for i in range(len(plus_di)):
-        sum_di = plus_di[i] + minus_di[i]
-        dx = 100 * abs(plus_di[i] - minus_di[i]) / sum_di if sum_di > 0 else 0
+        s = plus_di[i] + minus_di[i]
+        dx = 100 * abs(plus_di[i] - minus_di[i]) / s if s > 0 else 0
         dx_list.append(dx)
 
-    # ADX (average of DX)
     adx = sum(dx_list[-period:]) / period if len(dx_list) >= period else 0
     return adx
 
 # =========================
-# PRO ADDITIONS
+# STRUCTURE & PRICE ACTION
 # =========================
 def htf_bias():
     c = get_klines("4h")
-    if not c or len(c) < 6:
+    if not c or len(c) < 8:
         return None
-    lows = [x["low"] for x in c[-6:]]
-    highs = [x["high"] for x in c[-6:]]
-    long_count = sum(1 for i in range(1, 6) if lows[-i] > lows[-i-1])
-    short_count = sum(1 for i in range(1, 6) if highs[-i] < highs[-i-1])
-    if long_count >= 4:
+    lows = [x["low"] for x in c[-8:]]
+    highs = [x["high"] for x in c[-8:]]
+    long_count = sum(1 for i in range(1, 8) if lows[-i] > lows[-i-1])
+    short_count = sum(1 for i in range(1, 8) if highs[-i] < highs[-i-1])
+    if long_count >= 5:
         return "LONG"
-    if short_count >= 4:
+    if short_count >= 5:
         return "SHORT"
     return None
 
@@ -242,6 +270,8 @@ def valid_session():
 
 def liquidity_sweep(c, bias, grade_level="A"):
     threshold = 1.02 if grade_level in ["C", "D"] else 1.01 if grade_level == "B" else 1.0
+    if len(c) < 7:
+        return False
     if bias == "LONG":
         min_low = min(x["low"] for x in c[-6:-1])
         return c[-1]["low"] < min_low * threshold
@@ -251,27 +281,22 @@ def liquidity_sweep(c, bias, grade_level="A"):
     return False
 
 def detect_fvg(c, bias, grade_level="A"):
+    if len(c) < 3:
+        return None
     threshold = 1.02 if grade_level in ["C", "D"] else 1.01 if grade_level == "B" else 1.0
-    c1, c3 = c[-3], c[-1]
-    if bias == "LONG" and c1["high"] < c3["low"] * threshold:
-        return (c1["high"], c3["low"] * threshold)
-    if bias == "SHORT" and c1["low"] > c3["high"] * (2 - threshold):
-        return (c3["high"] * (2 - threshold), c1["low"])
+    c1, c2, c3 = c[-3], c[-2], c[-1]
+    if bias == "LONG":
+        # گپ بین high کندل 1 و low کندل 3
+        if c1["high"] < c3["low"] * threshold and c2["low"] > c1["high"]:
+            return (c1["high"], c3["low"] * threshold)
+    if bias == "SHORT":
+        if c1["low"] > c3["high"] * (2 - threshold) and c2["high"] < c1["low"]:
+            return (c3["high"] * (2 - threshold), c1["low"])
     return None
 
-def confidence_score(potential, rsi_conf=0, grade_level="A"):
-    base = 30 if grade_level == "A" else 25 if grade_level == "B" else 15 if grade_level == "C" else 10
-    s = base + rsi_conf
-    bonus = 25 if grade_level == "A" else 20 if grade_level == "B" else 10 if grade_level == "C" else 5
-    if potential > 1000: s += bonus
-    if potential > 1500: s += bonus
-    if potential > 2000: s += bonus / 2
-    return min(s, 95)
-
-# =========================
-# NDS CORE
-# =========================
 def compression(c, grade_level="A"):
+    if len(c) < 7:
+        return False
     ranges = [x["high"] - x["low"] for x in c[-6:-1]]
     if not ranges:
         return False
@@ -280,6 +305,8 @@ def compression(c, grade_level="A"):
     return (c[-1]["high"] - c[-1]["low"]) < avg_range * threshold
 
 def early_bias(c):
+    if len(c) < 4:
+        return None
     lows = [x["low"] for x in c[-4:]]
     highs = [x["high"] for x in c[-4:]]
     if len(lows) >= 3 and lows[-1] > lows[-2] > lows[-3]:
@@ -289,6 +316,8 @@ def early_bias(c):
     return None
 
 def displacement(c, bias, grade_level="A"):
+    if len(c) < 2:
+        return False
     last, prev = c[-1], c[-2]
     body = abs(last["close"] - last["open"])
     full = last["high"] - last["low"]
@@ -303,18 +332,89 @@ def displacement(c, bias, grade_level="A"):
     return False
 
 # =========================
-# LIMIT
+# SIGNAL CORE
 # =========================
-def can_send():
-    today = today_str()
-    signals_today.setdefault(today, 0)
-    if signals_today[today] >= MAX_SIGNALS_PER_DAY:
-        return False
-    signals_today[today] += 1
-    return True
+def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
+    fvg = detect_fvg(c, bias, grade_level)
+    if not fvg:
+        return None
+
+    entry = (fvg[0] + fvg[1]) / 2
+    atr = calculate_atr(c)
+    risk = abs(fvg[1] - fvg[0]) + atr * 0.5
+
+    if bias == "LONG":
+        sl = fvg[0] - risk * 0.2
+        tp = entry + risk * 3
+        title = "🟢 BTC LONG – NDS PRO V7.1"
+        safe_lev = SAFE_LEVERAGE_LONG
+    else:
+        sl = fvg[1] + risk * 0.2
+        tp = entry - risk * 3
+        title = "🔴 BTC SHORT – NDS PRO V7.1"
+        safe_lev = SAFE_LEVERAGE_SHORT
+
+    potential = abs(tp - entry)
+    if potential < MIN_PROFIT_USD:
+        return None
+
+    risk_usd = DEFAULT_CAPITAL * RISK_PERCENT
+    position_size_btc = risk_usd / abs(entry - sl) if abs(entry - sl) > 0 else 0
+
+    conf = confidence_score(potential, rsi_conf, grade_level)
+    warning = ""
+    if grade_level == "A":
+        warning = "عالی و مطمئن—ورود منطقی با پلن ریسک."
+    elif grade_level == "B":
+        warning = "خوب—با احتیاط و مدیریت ریسک."
+    elif grade_level == "C":
+        warning = "ضعیف—فقط اگر تایید اضافه داری."
+    elif grade_level == "D":
+        warning = "خیلی ضعیف—ترجیحاً skip."
+
+    message = f"""
+{title}
+
+TF: {tf}
+🕒 {time_str()}
+
+Entry: {entry:.2f}
+SL: {sl:.2f}
+TP: {tp:.2f}
+
+Position Size (1% risk on ${DEFAULT_CAPITAL}): {position_size_btc:.4f} BTC
+Safe Leverage: {safe_lev}x
+Funding Rate: {funding:.4f}%
+Open Interest: {oi:,.0f}
+
+Confidence: {conf}%
+Grade: {grade_level}
+{warning}
+
+⚠️ تصمیم نهایی با شماست
+"""
+    return {
+        "date": today_str(),
+        "grade": grade_level,
+        "tf": tf,
+        "bias": bias,
+        "entry": entry,
+        "tp": tp,
+        "sl": sl,
+        "message": message
+    }
+
+def confidence_score(potential, rsi_conf=0, grade_level="A"):
+    base = 30 if grade_level == "A" else 25 if grade_level == "B" else 15 if grade_level == "C" else 10
+    s = base + rsi_conf
+    bonus = 25 if grade_level == "A" else 20 if grade_level == "B" else 10 if grade_level == "C" else 5
+    if potential > 1000: s += bonus
+    if potential > 1500: s += bonus
+    if potential > 2000: s += bonus / 2
+    return min(s, 95)
 
 # =========================
-# AUTO SIGNAL - V7
+# AUTO SIGNAL LOOP
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     HTF = htf_bias()
@@ -339,10 +439,10 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
         rsi = calculate_rsi(c)
         rsi_conf = 10 if (bias == "LONG" and rsi > 55) or (bias == "SHORT" and rsi < 45) else 5 if (bias == "LONG" and rsi > 45) or (bias == "SHORT" and rsi < 55) else 0
-
         adx_value = calculate_adx(c)
 
-        # چک برای A (قوی)
+        # درجه‌بندی
+        grade_level = None
         if (displacement(c, bias, "A") and
             liquidity_sweep(c, bias, "A") and
             compression(c, "A") and
@@ -351,7 +451,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             adx_value > 25 and
             rsi_conf > 0):
             grade_level = "A"
-        # B
         elif (displacement(c, bias, "B") and
               liquidity_sweep(c, bias, "B") and
               compression(c, "B") and
@@ -359,7 +458,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
               volume_filter(c, "B") and
               adx_value > 20):
             grade_level = "B"
-        # C
         elif (displacement(c, bias, "C") and
               liquidity_sweep(c, bias, "C") and
               compression(c, "C") and
@@ -367,7 +465,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
               volume_filter(c, "C") and
               adx_value > 15):
             grade_level = "C"
-        # D
         elif (displacement(c, bias, "D") and
               liquidity_sweep(c, bias, "D") and
               compression(c, "D") and
@@ -390,73 +487,21 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         if not can_send():
             continue
 
-        fvg = detect_fvg(c, bias, grade_level)
-        entry = sum(fvg) / 2
-        atr = calculate_atr(c)
-        risk = abs(fvg[1] - fvg[0]) + atr * 0.5
-
-        if bias == "LONG":
-            sl = fvg[0] - risk * 0.2
-            tp = entry + risk * 3
-            title = "🟢🟢🟢 BTC LONG – NDS PRO V7"
-            safe_lev = SAFE_LEVERAGE_LONG
-        else:
-            sl = fvg[1] + risk * 0.2
-            tp = entry - risk * 3
-            title = "🔴🔴🔴 BTC SHORT – NDS PRO V7"
-            safe_lev = SAFE_LEVERAGE_SHORT
-
-        potential = abs(tp - entry)
-        if potential < MIN_PROFIT_USD:
+        sig = build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf)
+        if not sig:
             continue
 
-        risk_usd = DEFAULT_CAPITAL * RISK_PERCENT
-        position_size_btc = risk_usd / abs(entry - sl) if abs(entry - sl) > 0 else 0
-
-        conf = confidence_score(potential, rsi_conf, grade_level)
-        grade = grade_level
-
-        warning = ""
-        if grade == "A":
-            warning = "عالی و مطمئن—اعتماد کن و وارد شو!"
-        elif grade == "B":
-            warning = "متوسط—با احتیاط وارد شو"
-        elif grade == "C":
-            warning = "ضعیف—احتیاط کن یا skip"
-        elif grade == "D":
-            warning = "خیلی ضعیف—احتمال fake بالا، skip کن"
-
-        logs.append({"date": today_str(), "grade": grade, "tf": tf, "bias": bias, "entry": entry, "tp": tp, "sl": sl})
+        logs.append({
+            "date": sig["date"], "grade": sig["grade"], "tf": sig["tf"],
+            "bias": sig["bias"], "entry": sig["entry"], "tp": sig["tp"], "sl": sig["sl"]
+        })
         save_json(SIGNAL_LOG_FILE, logs[-1000:])
 
         receivers = set(VIP_USERS)
         if ADMIN_ID:
             receivers.add(ADMIN_ID)
-
-        message = f"""
-{title}
-
-TF: {tf}
-🕒 {time_str()}
-
-Entry: {entry:.2f}
-SL: {sl:.2f}
-TP: {tp:.2f}
-
-Position Size (1% risk on ${DEFAULT_CAPITAL}): {position_size_btc:.4f} BTC
-Safe Leverage: {safe_lev}x
-Funding Rate: {funding:.4f}%
-Open Interest: {oi:,.0f}
-
-Confidence: {conf}%
-Grade: {grade}
-{warning}
-
-⚠️ تصمیم نهایی با شماست
-"""
-
         for rid in receivers:
-            await context.bot.send_message(chat_id=rid, text=message)
+            await context.bot.send_message(chat_id=rid, text=sig["message"])
 
 # =========================
 # DAILY SUMMARY
@@ -478,7 +523,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7
+📊 DAILY SUMMARY – BTC NDS PRO V7.1
 
 Date: {today}
 
@@ -506,7 +551,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = sum(1 for x in today_signals if x.get("grade") == "C")
     d = sum(1 for x in today_signals if x.get("grade") == "D")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V7.1 (Manual)
 
 Date: {today}
 
@@ -526,7 +571,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V7\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V7.1\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
@@ -548,7 +593,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
         return
-    uid = int(context.args[0])
+    if not context.args:
+        await update.message.reply_text("فرمت: /approve <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("شناسه نامعتبر است.")
+        return
     VIP_USERS.add(uid)
     save_vips()
     await update.message.reply_text("✅ VIP شد")
@@ -556,13 +608,23 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
         return
-    uid = int(context.args[0])
+    if not context.args:
+        await update.message.reply_text("فرمت: /remove <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("شناسه نامعتبر است.")
+        return
     VIP_USERS.discard(uid)
     save_vips()
     await update.message.reply_text("❌ حذف شد")
 
 async def viplist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
+        return
+    if not VIP_USERS:
+        await update.message.reply_text("لیست VIP خالی است.")
         return
     await update.message.reply_text("\n".join(str(x) for x in VIP_USERS))
 
@@ -576,7 +638,7 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         d = r.json()
         price = float(d["lastPrice"])
         change = float(d["priceChangePercent"])
-    except:
+    except Exception:
         await update.message.reply_text("❌ خطا در دریافت قیمت")
         return
     sign = "🟢 +" if change >= 0 else "🔴 "
@@ -595,7 +657,7 @@ async def high(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r.raise_for_status()
         d = r.json()
         high_price = float(d["highPrice"])
-    except:
+    except Exception:
         await update.message.reply_text("❌ خطا در دریافت High")
         return
     await update.message.reply_text(f"""
@@ -619,7 +681,7 @@ async def ath(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ath_price = high
                 ath_time = int(c[0])
         ath_datetime = datetime.utcfromtimestamp(ath_time / 1000) + timedelta(hours=3, minutes=30)
-    except:
+    except Exception:
         await update.message.reply_text("❌ خطا در دریافت ATH")
         return
     await update.message.reply_text(f"""
@@ -632,7 +694,7 @@ Source: MEXC
 """)
 
 # =========================
-# BACKTEST ADVANCED
+# BACKTEST (SIM SUMMARY)
 # =========================
 async def backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
@@ -648,14 +710,9 @@ async def backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c_trades = sum(1 for log in logs if log.get("grade") == "C")
     d_trades = sum(1 for log in logs if log.get("grade") == "D")
 
-    # فرض win برای A/B بالا، C/D پایین (simulate)
     wins = a_trades * 0.8 + b_trades * 0.6 + c_trades * 0.45 + d_trades * 0.35
     win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
-
-    # Profit factor simulate
     profit_factor = 1.8 if a_trades > b_trades else 1.5 if b_trades > c_trades else 1.2
-
-    # Max drawdown simulate
     max_drawdown = 12 if a_trades > 10 else 18
 
     await update.message.reply_text(f"""
@@ -671,13 +728,16 @@ Win Rate تقریبی: {win_rate:.1f}%
 Profit Factor تقریبی: {profit_factor}
 Max Drawdown تقریبی: {max_drawdown}%
 
-(برای دقت بیشتر، logها رو نگه دار و دستی چک کن)
+(برای دقت بیشتر، بک‌تست واقعی روی داده‌های تاریخی انجام بده)
 """)
 
 # =========================
 # MAIN
 # =========================
 def main():
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN env var is missing")
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -691,10 +751,15 @@ def main():
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("backtest", backtest))
 
+    # زمان‌بندی‌ها
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
-    app.job_queue.run_daily(daily_summary, time=datetime.utcnow().replace(hour=20, minute=30, second=0, microsecond=0))
 
+    # خلاصه‌ی روزانه ساعت 20:30 ایران => 17:00 UTC (تقریباً؛ بدون DST)
+    daily_time_utc = dtime(hour=17, minute=0)
+    app.job_queue.run_daily(daily_summary, time=daily_time_utc)
+
+    # وبهوک امن‌تر
     app.run_webhook(
         listen="0.0.0.0",
         port=int(os.getenv("PORT", 10000)),
@@ -704,6 +769,6 @@ def main():
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({"time": time_str()})
+    restarts.append({"time": time_str(), "version": "V7.1"})
     save_json(RESTART_LOG_FILE, restarts[-50:])
     main()
