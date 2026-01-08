@@ -11,17 +11,16 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG - V7.1 STABLE
+# CONFIG - V7.2 (24H, GRADE LIMITS)
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# امنیت: مسیر وبهوک را از توکن جدا نگه می‌داریم
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-render-service.onrender.com")
 WEBHOOK_PATH = "/webhook"
 
 SYMBOL = "BTCUSDT"
 LIMIT = 200  # داده‌ی بیشتر برای اندیکاتورها
-MAX_SIGNALS_PER_DAY = 15
+
 MIN_PROFIT_USD = 50
 
 RSI_PERIOD = 14
@@ -29,8 +28,7 @@ VOLUME_MULTIPLIER = 0.9
 ATR_PERIOD = 14
 ADX_PERIOD = 14
 
-# Funding در اکثر صرافی‌ها بسیار کوچک است (0.01% ~ 0.0001)
-# اگر API مقدار را به اعشار می‌دهد، آستانه‌ی منطقی 0.001–0.003 است
+# Funding کوچک (مثلاً 0.01% ~ 0.0001)
 FUNDING_THRESHOLD = 0.003
 
 DEFAULT_CAPITAL = 10000
@@ -45,6 +43,10 @@ STRENGTH_THRESHOLD_D = 0.30
 
 # حرکت خیلی قوی بدون ورود
 STRONG_MOVE_USD = 200
+
+# محدودیت اختصاصی گریدها
+MAX_C_SIGNALS_PER_DAY = 6
+MAX_D_SIGNALS_PER_DAY = 8
 
 # =========================
 # PERSISTENT FILES
@@ -105,19 +107,36 @@ def save_vips():
 load_vips()
 
 # =========================
-# LIMIT (PERSISTENT)
+# LIMITS (GRADE-BASED)
 # =========================
 def get_limit_state():
-    return load_json(LIMIT_FILE, {"date": today_str(), "count": 0})
+    return load_json(
+        LIMIT_FILE,
+        {"date": today_str(), "c_count": 0, "d_count": 0}
+    )
 
-def can_send():
+def can_send_grade(grade):
+    """
+    A, B: نامحدود
+    C: حداکثر MAX_C_SIGNALS_PER_DAY در روز
+    D: حداکثر MAX_D_SIGNALS_PER_DAY در روز
+    """
     state = get_limit_state()
-    if state["date"] != today_str():
-        state = {"date": today_str(), "count": 0}
-    if state["count"] >= MAX_SIGNALS_PER_DAY:
-        save_json(LIMIT_FILE, state)
-        return False
-    state["count"] += 1
+    today = today_str()
+    if state.get("date") != today:
+        state = {"date": today, "c_count": 0, "d_count": 0}
+
+    if grade == "C":
+        if state["c_count"] >= MAX_C_SIGNALS_PER_DAY:
+            save_json(LIMIT_FILE, state)
+            return False
+        state["c_count"] += 1
+    elif grade == "D":
+        if state["d_count"] >= MAX_D_SIGNALS_PER_DAY:
+            save_json(LIMIT_FILE, state)
+            return False
+        state["d_count"] += 1
+    # A و B محدودیت ندارند
     save_json(LIMIT_FILE, state)
     return True
 
@@ -264,10 +283,6 @@ def htf_bias():
         return "SHORT"
     return None
 
-def valid_session():
-    h = iran_time().hour
-    return (10 <= h <= 14) or (16 <= h <= 20)
-
 def liquidity_sweep(c, bias, grade_level="A"):
     threshold = 1.02 if grade_level in ["C", "D"] else 1.01 if grade_level == "B" else 1.0
     if len(c) < 7:
@@ -286,7 +301,6 @@ def detect_fvg(c, bias, grade_level="A"):
     threshold = 1.02 if grade_level in ["C", "D"] else 1.01 if grade_level == "B" else 1.0
     c1, c2, c3 = c[-3], c[-2], c[-1]
     if bias == "LONG":
-        # گپ بین high کندل 1 و low کندل 3
         if c1["high"] < c3["low"] * threshold and c2["low"] > c1["high"]:
             return (c1["high"], c3["low"] * threshold)
     if bias == "SHORT":
@@ -324,7 +338,12 @@ def displacement(c, bias, grade_level="A"):
     if full == 0:
         return False
     strength = body / full
-    threshold = STRENGTH_THRESHOLD_A if grade_level == "A" else STRENGTH_THRESHOLD_B if grade_level == "B" else STRENGTH_THRESHOLD_C if grade_level == "C" else STRENGTH_THRESHOLD_D
+    threshold = (
+        STRENGTH_THRESHOLD_A if grade_level == "A"
+        else STRENGTH_THRESHOLD_B if grade_level == "B"
+        else STRENGTH_THRESHOLD_C if grade_level == "C"
+        else STRENGTH_THRESHOLD_D
+    )
     if bias == "LONG" and last["close"] > prev["high"] and strength > threshold:
         return True
     if bias == "SHORT" and last["close"] < prev["low"] and strength > threshold:
@@ -334,24 +353,46 @@ def displacement(c, bias, grade_level="A"):
 # =========================
 # SIGNAL CORE
 # =========================
+def confidence_score(potential, rsi_conf=0, grade_level="A"):
+    base = 30 if grade_level == "A" else 25 if grade_level == "B" else 15 if grade_level == "C" else 10
+    s = base + rsi_conf
+    bonus = 25 if grade_level == "A" else 20 if grade_level == "B" else 10 if grade_level == "C" else 5
+    if potential > 1000:
+        s += bonus
+    if potential > 1500:
+        s += bonus
+    if potential > 2000:
+        s += bonus / 2
+    return min(s, 95)
+
 def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
     fvg = detect_fvg(c, bias, grade_level)
-    if not fvg:
+    # برای D، FVG اختیاری است (گزینه A)
+    if grade_level != "D" and not fvg:
         return None
 
-    entry = (fvg[0] + fvg[1]) / 2
+    if fvg:
+        entry = (fvg[0] + fvg[1]) / 2
+    else:
+        # برای D بدون FVG، از قیمت آخر به‌عنوان entry استفاده می‌کنیم
+        entry = c[-1]["close"]
+
     atr = calculate_atr(c)
-    risk = abs(fvg[1] - fvg[0]) + atr * 0.5
+    if fvg:
+        base_risk = abs(fvg[1] - fvg[0])
+    else:
+        base_risk = atr
+    risk = base_risk + atr * 0.5
 
     if bias == "LONG":
-        sl = fvg[0] - risk * 0.2
+        sl = entry - risk * 0.8
         tp = entry + risk * 3
-        title = "🟢 BTC LONG – NDS PRO V7.1"
+        title = "🟢 BTC LONG – NDS PRO V7.2"
         safe_lev = SAFE_LEVERAGE_LONG
     else:
-        sl = fvg[1] + risk * 0.2
+        sl = entry + risk * 0.8
         tp = entry - risk * 3
-        title = "🔴 BTC SHORT – NDS PRO V7.1"
+        title = "🔴 BTC SHORT – NDS PRO V7.2"
         safe_lev = SAFE_LEVERAGE_SHORT
 
     potential = abs(tp - entry)
@@ -362,15 +403,14 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
     position_size_btc = risk_usd / abs(entry - sl) if abs(entry - sl) > 0 else 0
 
     conf = confidence_score(potential, rsi_conf, grade_level)
-    warning = ""
     if grade_level == "A":
         warning = "عالی و مطمئن—ورود منطقی با پلن ریسک."
     elif grade_level == "B":
         warning = "خوب—با احتیاط و مدیریت ریسک."
     elif grade_level == "C":
-        warning = "ضعیف—فقط اگر تایید اضافه داری."
-    elif grade_level == "D":
-        warning = "خیلی ضعیف—ترجیحاً skip."
+        warning = "متوسط—تایید اضافه کمک می‌کند."
+    else:
+        warning = "ضعیف‌ترین—بیشتر برای هشدار و دقت، نه ورود کور."
 
     message = f"""
 {title}
@@ -404,15 +444,6 @@ Grade: {grade_level}
         "message": message
     }
 
-def confidence_score(potential, rsi_conf=0, grade_level="A"):
-    base = 30 if grade_level == "A" else 25 if grade_level == "B" else 15 if grade_level == "C" else 10
-    s = base + rsi_conf
-    bonus = 25 if grade_level == "A" else 20 if grade_level == "B" else 10 if grade_level == "C" else 5
-    if potential > 1000: s += bonus
-    if potential > 1500: s += bonus
-    if potential > 2000: s += bonus / 2
-    return min(s, 95)
-
 # =========================
 # AUTO SIGNAL LOOP
 # =========================
@@ -430,7 +461,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
     for tf in ["15m", "30m", "1h"]:
         c = get_klines(tf)
-        if not c or not valid_session():
+        if not c:
             continue
 
         bias = early_bias(c)
@@ -438,41 +469,59 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         rsi = calculate_rsi(c)
-        rsi_conf = 10 if (bias == "LONG" and rsi > 55) or (bias == "SHORT" and rsi < 45) else 5 if (bias == "LONG" and rsi > 45) or (bias == "SHORT" and rsi < 55) else 0
+        rsi_conf = (
+            10 if (bias == "LONG" and rsi > 55) or (bias == "SHORT" and rsi < 45)
+            else 5 if (bias == "LONG" and rsi > 45) or (bias == "SHORT" and rsi < 55)
+            else 0
+        )
         adx_value = calculate_adx(c)
 
-        # درجه‌بندی
         grade_level = None
-        if (displacement(c, bias, "A") and
+
+        # A – خیلی سخت‌گیر
+        if (
+            displacement(c, bias, "A") and
             liquidity_sweep(c, bias, "A") and
             compression(c, "A") and
             detect_fvg(c, bias, "A") and
             volume_filter(c, "A") and
             adx_value > 25 and
-            rsi_conf > 0):
+            rsi_conf > 0
+        ):
             grade_level = "A"
-        elif (displacement(c, bias, "B") and
-              liquidity_sweep(c, bias, "B") and
-              compression(c, "B") and
-              detect_fvg(c, bias, "B") and
-              volume_filter(c, "B") and
-              adx_value > 20):
+
+        # B – سخت‌گیر ولی آزادتر
+        elif (
+            displacement(c, bias, "B") and
+            liquidity_sweep(c, bias, "B") and
+            compression(c, "B") and
+            detect_fvg(c, bias, "B") and
+            volume_filter(c, "B") and
+            adx_value > 20
+        ):
             grade_level = "B"
-        elif (displacement(c, bias, "C") and
-              liquidity_sweep(c, bias, "C") and
-              compression(c, "C") and
-              detect_fvg(c, bias, "C") and
-              volume_filter(c, "C") and
-              adx_value > 15):
+
+        # C – متوسط
+        elif (
+            displacement(c, bias, "C") and
+            liquidity_sweep(c, bias, "C") and
+            compression(c, "C") and
+            detect_fvg(c, bias, "C") and
+            adx_value > 12
+        ):
             grade_level = "C"
-        elif (displacement(c, bias, "D") and
-              liquidity_sweep(c, bias, "D") and
-              compression(c, "D") and
-              detect_fvg(c, bias, "D") and
-              volume_filter(c, "D") and
-              adx_value > 10):
-            grade_level = "D"
+
+        # D – آزادترین (FVG اختیاری، شرط‌ها سبک‌تر)
         else:
+            # برای D: displacement + یکی از (sweep یا compression) + ADX > 5
+            if (
+                displacement(c, bias, "D") and
+                (liquidity_sweep(c, bias, "D") or compression(c, "D")) and
+                adx_value > 5
+            ):
+                grade_level = "D"
+
+        if not grade_level:
             continue
 
         move = abs(c[-1]["close"] - c[-2]["open"])
@@ -484,7 +533,8 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                 text=f"⚠️ STRONG MOVE – NO ENTRY\nDirection: {bias}\nTF: {tf}\nMove: ~{int(move)} USDT\n🕒 {time_str()}"
             )
 
-        if not can_send():
+        # محدودیت گرید (A/B نامحدود، C/D محدود)
+        if not can_send_grade(grade_level):
             continue
 
         sig = build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf)
@@ -523,7 +573,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.1
+📊 DAILY SUMMARY – BTC NDS PRO V7.2
 
 Date: {today}
 
@@ -551,7 +601,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = sum(1 for x in today_signals if x.get("grade") == "C")
     d = sum(1 for x in today_signals if x.get("grade") == "D")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.1 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V7.2 (Manual)
 
 Date: {today}
 
@@ -571,7 +621,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V7.1\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V7.2\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
@@ -670,7 +720,11 @@ Source: MEXC
 
 async def ath(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        r = requests.get("https://api.mexc.com/api/v3/klines", params={"symbol": SYMBOL, "interval": "1d", "limit": 1000}, timeout=15)
+        r = requests.get(
+            "https://api.mexc.com/api/v3/klines",
+            params={"symbol": SYMBOL, "interval": "1d", "limit": 1000},
+            timeout=15
+        )
         r.raise_for_status()
         data = r.json()
         ath_price = 0
@@ -751,15 +805,13 @@ def main():
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("backtest", backtest))
 
-    # زمان‌بندی‌ها
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
 
-    # خلاصه‌ی روزانه ساعت 20:30 ایران => 17:00 UTC (تقریباً؛ بدون DST)
+    # خلاصه‌ی روزانه حدود 20:30 ایران (تقریباً 17:00 UTC بدون DST)
     daily_time_utc = dtime(hour=17, minute=0)
     app.job_queue.run_daily(daily_summary, time=daily_time_utc)
 
-    # وبهوک امن‌تر
     app.run_webhook(
         listen="0.0.0.0",
         port=int(os.getenv("PORT", 10000)),
@@ -769,6 +821,6 @@ def main():
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({"time": time_str(), "version": "V7.1"})
+    restarts.append({"time": time_str(), "version": "V7.2"})
     save_json(RESTART_LOG_FILE, restarts[-50:])
     main()
