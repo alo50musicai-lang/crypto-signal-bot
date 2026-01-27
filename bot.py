@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG - V7.2 (24H, GRADE LIMITS)
+# CONFIG - V7.3 (24H, MEDIUM D)
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -28,7 +28,6 @@ VOLUME_MULTIPLIER = 0.9
 ATR_PERIOD = 14
 ADX_PERIOD = 14
 
-# Funding کوچک (مثلاً 0.01% ~ 0.0001)
 FUNDING_THRESHOLD = 0.003
 
 DEFAULT_CAPITAL = 10000
@@ -39,9 +38,8 @@ SAFE_LEVERAGE_SHORT = 3
 STRENGTH_THRESHOLD_A = 0.55
 STRENGTH_THRESHOLD_B = 0.45
 STRENGTH_THRESHOLD_C = 0.35
-STRENGTH_THRESHOLD_D = 0.30
+STRENGTH_THRESHOLD_D = 0.25  # کمی سبک‌تر برای D
 
-# حرکت خیلی قوی بدون ورود
 STRONG_MOVE_USD = 200
 
 # محدودیت اختصاصی گریدها
@@ -116,11 +114,6 @@ def get_limit_state():
     )
 
 def can_send_grade(grade):
-    """
-    A, B: نامحدود
-    C: حداکثر MAX_C_SIGNALS_PER_DAY در روز
-    D: حداکثر MAX_D_SIGNALS_PER_DAY در روز
-    """
     state = get_limit_state()
     today = today_str()
     if state.get("date") != today:
@@ -136,7 +129,7 @@ def can_send_grade(grade):
             save_json(LIMIT_FILE, state)
             return False
         state["d_count"] += 1
-    # A و B محدودیت ندارند
+
     save_json(LIMIT_FILE, state)
     return True
 
@@ -185,7 +178,7 @@ def get_funding_and_oi():
         return None, None
 
 # =========================
-# INDICATORS - RSI / ATR / ADX
+# INDICATORS
 # =========================
 def calculate_rsi(c, period=RSI_PERIOD):
     closes = [x["close"] for x in c]
@@ -367,14 +360,13 @@ def confidence_score(potential, rsi_conf=0, grade_level="A"):
 
 def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
     fvg = detect_fvg(c, bias, grade_level)
-    # برای D، FVG اختیاری است (گزینه A)
+    # برای D، FVG اختیاری است
     if grade_level != "D" and not fvg:
         return None
 
     if fvg:
         entry = (fvg[0] + fvg[1]) / 2
     else:
-        # برای D بدون FVG، از قیمت آخر به‌عنوان entry استفاده می‌کنیم
         entry = c[-1]["close"]
 
     atr = calculate_atr(c)
@@ -387,12 +379,12 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
     if bias == "LONG":
         sl = entry - risk * 0.8
         tp = entry + risk * 3
-        title = "🟢 BTC LONG – NDS PRO V7.2"
+        title = "🟢 BTC LONG – NDS PRO V7.3"
         safe_lev = SAFE_LEVERAGE_LONG
     else:
         sl = entry + risk * 0.8
         tp = entry - risk * 3
-        title = "🔴 BTC SHORT – NDS PRO V7.2"
+        title = "🔴 BTC SHORT – NDS PRO V7.3"
         safe_lev = SAFE_LEVERAGE_SHORT
 
     potential = abs(tp - entry)
@@ -410,7 +402,7 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
     elif grade_level == "C":
         warning = "متوسط—تایید اضافه کمک می‌کند."
     else:
-        warning = "ضعیف‌ترین—بیشتر برای هشدار و دقت، نه ورود کور."
+        warning = "ضعیف‌تر—بیشتر برای هشدار و دقت، نه ورود کور."
 
     message = f"""
 {title}
@@ -511,14 +503,21 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         ):
             grade_level = "C"
 
-        # D – آزادترین (FVG اختیاری، شرط‌ها سبک‌تر)
+        # D – متوسط (نه خیلی سفت، نه خیلی ول)
         else:
-            # برای D: displacement + یکی از (sweep یا compression) + ADX > 5
-            if (
-                displacement(c, bias, "D") and
-                (liquidity_sweep(c, bias, "D") or compression(c, "D")) and
-                adx_value > 5
-            ):
+            # برای D: یکی از این‌ها کافی است:
+            # 1) displacement سبک + ADX > 5
+            # 2) sweep کوچک + ADX > 5
+            # 3) compression + ADX > 5
+            d_ok = False
+            if displacement(c, bias, "D") and adx_value > 5:
+                d_ok = True
+            elif liquidity_sweep(c, bias, "D") and adx_value > 5:
+                d_ok = True
+            elif compression(c, "D") and adx_value > 5:
+                d_ok = True
+
+            if d_ok:
                 grade_level = "D"
 
         if not grade_level:
@@ -533,7 +532,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                 text=f"⚠️ STRONG MOVE – NO ENTRY\nDirection: {bias}\nTF: {tf}\nMove: ~{int(move)} USDT\n🕒 {time_str()}"
             )
 
-        # محدودیت گرید (A/B نامحدود، C/D محدود)
         if not can_send_grade(grade_level):
             continue
 
@@ -573,7 +571,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.2
+📊 DAILY SUMMARY – BTC NDS PRO V7.3
 
 Date: {today}
 
@@ -601,7 +599,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = sum(1 for x in today_signals if x.get("grade") == "C")
     d = sum(1 for x in today_signals if x.get("grade") == "D")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.2 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V7.3 (Manual)
 
 Date: {today}
 
@@ -621,7 +619,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V7.2\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V7.3\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
@@ -748,7 +746,7 @@ Source: MEXC
 """)
 
 # =========================
-# BACKTEST (SIM SUMMARY)
+# BACKTEST
 # =========================
 async def backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
@@ -808,7 +806,6 @@ def main():
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
 
-    # خلاصه‌ی روزانه حدود 20:30 ایران (تقریباً 17:00 UTC بدون DST)
     daily_time_utc = dtime(hour=17, minute=0)
     app.job_queue.run_daily(daily_summary, time=daily_time_utc)
 
@@ -821,6 +818,6 @@ def main():
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({"time": time_str(), "version": "V7.2"})
+    restarts.append({"time": time_str(), "version": "V7.3"})
     save_json(RESTART_LOG_FILE, restarts[-50:])
     main()
