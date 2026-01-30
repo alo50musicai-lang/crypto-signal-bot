@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG - V7.3 (24H, MEDIUM D)
+# CONFIG - V7.4 (D-1, 1000$ MOVE)
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -38,9 +38,13 @@ SAFE_LEVERAGE_SHORT = 3
 STRENGTH_THRESHOLD_A = 0.55
 STRENGTH_THRESHOLD_B = 0.45
 STRENGTH_THRESHOLD_C = 0.35
-STRENGTH_THRESHOLD_D = 0.25  # کمی سبک‌تر برای D
+STRENGTH_THRESHOLD_D = 0.25  # برای A/B/C، D ساختاری اگر لازم شد
 
+# حرکت خیلی قوی بدون ورود (برای هشدار)
 STRONG_MOVE_USD = 200
+
+# آستانهٔ حرکت برای گرید D-1
+D1_MOVE_THRESHOLD = 1000  # دلار
 
 # محدودیت اختصاصی گریدها
 MAX_C_SIGNALS_PER_DAY = 6
@@ -344,6 +348,35 @@ def displacement(c, bias, grade_level="A"):
     return False
 
 # =========================
+# D-1 MOVE DETECTION
+# =========================
+def detect_d1_move(c, threshold=D1_MOVE_THRESHOLD, window=5):
+    """
+    حرکت قیمتی ≥ threshold در چند کندل اخیر (window)
+    بدون توجه به bias، ADX، sweep، FVG و ...
+    """
+    if len(c) < window + 1:
+        return None
+
+    recent = c[-window:]
+    highs = [x["high"] for x in recent]
+    lows = [x["low"] for x in recent]
+    max_high = max(highs)
+    min_low = min(lows)
+    move = max_high - min_low
+
+    if move >= threshold:
+        # جهت حرکت را بر اساس close آخر نسبت به open اولین کندل می‌گیریم
+        first_open = recent[0]["open"]
+        last_close = recent[-1]["close"]
+        bias = "LONG" if last_close > first_open else "SHORT"
+        return {
+            "move": move,
+            "bias": bias
+        }
+    return None
+
+# =========================
 # SIGNAL CORE
 # =========================
 def confidence_score(potential, rsi_conf=0, grade_level="A"):
@@ -379,12 +412,12 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
     if bias == "LONG":
         sl = entry - risk * 0.8
         tp = entry + risk * 3
-        title = "🟢 BTC LONG – NDS PRO V7.3"
+        title = "🟢 BTC LONG – NDS PRO V7.4"
         safe_lev = SAFE_LEVERAGE_LONG
     else:
         sl = entry + risk * 0.8
         tp = entry - risk * 3
-        title = "🔴 BTC SHORT – NDS PRO V7.3"
+        title = "🔴 BTC SHORT – NDS PRO V7.4"
         safe_lev = SAFE_LEVERAGE_SHORT
 
     potential = abs(tp - entry)
@@ -441,9 +474,7 @@ Grade: {grade_level}
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     HTF = htf_bias()
-    if HTF is None:
-        return
-
+    # برای A/B/C همچنان HTF لازم است، برای D-1 نه
     funding, oi = get_funding_and_oi()
     if funding is None or abs(funding) > FUNDING_THRESHOLD:
         return
@@ -454,6 +485,36 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     for tf in ["15m", "30m", "1h"]:
         c = get_klines(tf)
         if not c:
+            continue
+
+        # ---------- گرید D-1 (حرکت ≥ 1000 دلار، بدون ساختار) ----------
+        d1_info = detect_d1_move(c, threshold=D1_MOVE_THRESHOLD, window=5)
+        if d1_info:
+            grade_level = "D"
+            bias = d1_info["bias"]
+            rsi = calculate_rsi(c)
+            rsi_conf = (
+                10 if (bias == "LONG" and rsi > 55) or (bias == "SHORT" and rsi < 45)
+                else 5 if (bias == "LONG" and rsi > 45) or (bias == "SHORT" and rsi < 55)
+                else 0
+            )
+
+            if can_send_grade(grade_level):
+                sig = build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf)
+                if sig:
+                    logs.append({
+                        "date": sig["date"], "grade": sig["grade"], "tf": sig["tf"],
+                        "bias": sig["bias"], "entry": sig["entry"], "tp": sig["tp"], "sl": sig["sl"]
+                    })
+                    save_json(SIGNAL_LOG_FILE, logs[-1000:])
+                    receivers = set(VIP_USERS)
+                    if ADMIN_ID:
+                        receivers.add(ADMIN_ID)
+                    for rid in receivers:
+                        await context.bot.send_message(chat_id=rid, text=sig["message"])
+
+        # ---------- A/B/C (ساختاری، مثل قبل) ----------
+        if HTF is None:
             continue
 
         bias = early_bias(c)
@@ -502,23 +563,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             adx_value > 12
         ):
             grade_level = "C"
-
-        # D – متوسط (نه خیلی سفت، نه خیلی ول)
-        else:
-            # برای D: یکی از این‌ها کافی است:
-            # 1) displacement سبک + ADX > 5
-            # 2) sweep کوچک + ADX > 5
-            # 3) compression + ADX > 5
-            d_ok = False
-            if displacement(c, bias, "D") and adx_value > 5:
-                d_ok = True
-            elif liquidity_sweep(c, bias, "D") and adx_value > 5:
-                d_ok = True
-            elif compression(c, "D") and adx_value > 5:
-                d_ok = True
-
-            if d_ok:
-                grade_level = "D"
 
         if not grade_level:
             continue
@@ -571,7 +615,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.3
+📊 DAILY SUMMARY – BTC NDS PRO V7.4
 
 Date: {today}
 
@@ -599,7 +643,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = sum(1 for x in today_signals if x.get("grade") == "C")
     d = sum(1 for x in today_signals if x.get("grade") == "D")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.3 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V7.4 (Manual)
 
 Date: {today}
 
@@ -619,7 +663,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V7.3\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V7.4\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
@@ -818,6 +862,6 @@ def main():
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({"time": time_str(), "version": "V7.3"})
+    restarts.append({"time": time_str(), "version": "V7.4"})
     save_json(RESTART_LOG_FILE, restarts[-50:])
     main()
