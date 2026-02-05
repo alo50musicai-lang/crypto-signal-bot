@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG - V7.4 (D-1, 1000$ MOVE)
+# CONFIG - V7.5 (MULTI-TF, ANALYTIC D-1)
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -38,12 +38,12 @@ SAFE_LEVERAGE_SHORT = 3
 STRENGTH_THRESHOLD_A = 0.55
 STRENGTH_THRESHOLD_B = 0.45
 STRENGTH_THRESHOLD_C = 0.35
-STRENGTH_THRESHOLD_D = 0.25  # برای A/B/C، D ساختاری اگر لازم شد
+STRENGTH_THRESHOLD_D = 0.25
 
-# حرکت خیلی قوی بدون ورود (برای هشدار)
+# حرکت خیلی قوی بدون ورود (برای هشدار A/B/C)
 STRONG_MOVE_USD = 200
 
-# آستانهٔ حرکت برای گرید D-1
+# آستانهٔ حرکت برای گرید تحلیلی D-1
 D1_MOVE_THRESHOLD = 1000  # دلار
 
 # محدودیت اختصاصی گریدها
@@ -53,7 +53,6 @@ MAX_D_SIGNALS_PER_DAY = 8
 # =========================
 # PERSISTENT FILES
 # =========================
-BIAS_STATE_FILE = "bias_state.json"
 SIGNAL_LOG_FILE = "signal_log.json"
 STRONG_MOVE_LOG_FILE = "strong_move_log.json"
 RESTART_LOG_FILE = "restart_log.json"
@@ -140,11 +139,11 @@ def can_send_grade(grade):
 # =========================
 # MARKET DATA
 # =========================
-def get_klines(interval):
+def get_klines(interval, limit=LIMIT):
     try:
         r = requests.get(
             "https://api.mexc.com/api/v3/klines",
-            params={"symbol": SYMBOL, "interval": interval, "limit": LIMIT},
+            params={"symbol": SYMBOL, "interval": interval, "limit": limit},
             timeout=10
         )
         r.raise_for_status()
@@ -266,17 +265,17 @@ def calculate_adx(c, period=ADX_PERIOD):
 # =========================
 # STRUCTURE & PRICE ACTION
 # =========================
-def htf_bias():
-    c = get_klines("4h")
-    if not c or len(c) < 8:
+def htf_bias_4h():
+    c = get_klines("4h", limit=60)
+    if not c or len(c) < 10:
         return None
-    lows = [x["low"] for x in c[-8:]]
-    highs = [x["high"] for x in c[-8:]]
-    long_count = sum(1 for i in range(1, 8) if lows[-i] > lows[-i-1])
-    short_count = sum(1 for i in range(1, 8) if highs[-i] < highs[-i-1])
-    if long_count >= 5:
+    lows = [x["low"] for x in c[-10:]]
+    highs = [x["high"] for x in c[-10:]]
+    long_count = sum(1 for i in range(1, 10) if lows[i] > lows[i-1])
+    short_count = sum(1 for i in range(1, 10) if highs[i] < highs[i-1])
+    if long_count >= 6:
         return "LONG"
-    if short_count >= 5:
+    if short_count >= 6:
         return "SHORT"
     return None
 
@@ -320,9 +319,9 @@ def early_bias(c):
         return None
     lows = [x["low"] for x in c[-4:]]
     highs = [x["high"] for x in c[-4:]]
-    if len(lows) >= 3 and lows[-1] > lows[-2] > lows[-3]:
+    if lows[-1] > lows[-2] > lows[-3]:
         return "LONG"
-    if len(highs) >= 3 and highs[-1] < highs[-2] < highs[-3]:
+    if highs[-1] < highs[-2] < highs[-3]:
         return "SHORT"
     return None
 
@@ -348,32 +347,46 @@ def displacement(c, bias, grade_level="A"):
     return False
 
 # =========================
-# D-1 MOVE DETECTION
+# SUPPORT / RESISTANCE (1H)
 # =========================
-def detect_d1_move(c, threshold=D1_MOVE_THRESHOLD, window=5):
-    """
-    حرکت قیمتی ≥ threshold در چند کندل اخیر (window)
-    بدون توجه به bias، ADX، sweep، FVG و ...
-    """
-    if len(c) < window + 1:
+def find_nearest_sr_1h(current_price, direction):
+    c = get_klines("1h", limit=120)
+    if not c or len(c) < 20:
         return None
 
+    highs = [x["high"] for x in c]
+    lows = [x["low"] for x in c]
+
+    if direction == "LONG":
+        # نزدیک‌ترین مقاومت بالای قیمت فعلی
+        candidates = [h for h in highs if h > current_price]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda x: x - current_price)
+    else:
+        # نزدیک‌ترین حمایت زیر قیمت فعلی
+        candidates = [l for l in lows if l < current_price]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda x: current_price - x)
+
+# =========================
+# D-1 MOVE DETECTION (15m)
+# =========================
+def detect_d1_move(c, threshold=D1_MOVE_THRESHOLD, window=5):
+    if len(c) < window + 1:
+        return None
     recent = c[-window:]
     highs = [x["high"] for x in recent]
     lows = [x["low"] for x in recent]
     max_high = max(highs)
     min_low = min(lows)
     move = max_high - min_low
-
     if move >= threshold:
-        # جهت حرکت را بر اساس close آخر نسبت به open اولین کندل می‌گیریم
         first_open = recent[0]["open"]
         last_close = recent[-1]["close"]
         bias = "LONG" if last_close > first_open else "SHORT"
-        return {
-            "move": move,
-            "bias": bias
-        }
+        return {"move": move, "bias": bias}
     return None
 
 # =========================
@@ -391,33 +404,43 @@ def confidence_score(potential, rsi_conf=0, grade_level="A"):
         s += bonus / 2
     return min(s, 95)
 
-def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
-    fvg = detect_fvg(c, bias, grade_level)
-    # برای D، FVG اختیاری است
-    if grade_level != "D" and not fvg:
-        return None
+def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf,
+                 htf_bias=None, sr_target=None, atr=None, move_info=None):
+    last_close = c[-1]["close"]
 
-    if fvg:
-        entry = (fvg[0] + fvg[1]) / 2
+    # ATR برای 15m (برای D-1 مهم است)
+    if atr is None:
+        atr = calculate_atr(c)
+
+    # هدف بر اساس مولتی‌تایم‌فریم (حالت C)
+    if sr_target:
+        primary_target = sr_target
     else:
-        entry = c[-1]["close"]
+        if bias == "LONG":
+            primary_target = last_close + 3 * atr
+        else:
+            primary_target = last_close - 3 * atr
 
-    atr = calculate_atr(c)
-    if fvg:
-        base_risk = abs(fvg[1] - fvg[0])
-    else:
-        base_risk = atr
-    risk = base_risk + atr * 0.5
+    # هدف دوم اگر حرکت خیلی قوی باشد
+    secondary_target = None
+    if move_info and move_info.get("move", 0) >= 1500:
+        if bias == "LONG":
+            secondary_target = primary_target + 2 * atr
+        else:
+            secondary_target = primary_target - 2 * atr
 
+    entry = last_close
+
+    # SL ساده بر اساس ATR
     if bias == "LONG":
-        sl = entry - risk * 0.8
-        tp = entry + risk * 3
-        title = "🟢 BTC LONG – NDS PRO V7.4"
+        sl = entry - 1.5 * atr
+        tp = primary_target
+        title = "🟢 BTC LONG – NDS PRO V7.5"
         safe_lev = SAFE_LEVERAGE_LONG
     else:
-        sl = entry + risk * 0.8
-        tp = entry - risk * 3
-        title = "🔴 BTC SHORT – NDS PRO V7.4"
+        sl = entry + 1.5 * atr
+        tp = primary_target
+        title = "🔴 BTC SHORT – NDS PRO V7.5"
         safe_lev = SAFE_LEVERAGE_SHORT
 
     potential = abs(tp - entry)
@@ -428,6 +451,7 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
     position_size_btc = risk_usd / abs(entry - sl) if abs(entry - sl) > 0 else 0
 
     conf = confidence_score(potential, rsi_conf, grade_level)
+
     if grade_level == "A":
         warning = "عالی و مطمئن—ورود منطقی با پلن ریسک."
     elif grade_level == "B":
@@ -435,28 +459,42 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf):
     elif grade_level == "C":
         warning = "متوسط—تایید اضافه کمک می‌کند."
     else:
-        warning = "ضعیف‌تر—بیشتر برای هشدار و دقت، نه ورود کور."
+        warning = "تحلیلی و هشداردهنده—برای ورود کور مناسب نیست."
+
+    htf_text = f"HTF Bias (4h): {htf_bias}" if htf_bias else "HTF Bias (4h): نامشخص"
+
+    if secondary_target:
+        tp_text = f"TP1: {tp:.2f}\nTP2: {secondary_target:.2f}"
+    else:
+        tp_text = f"TP: {tp:.2f}"
+
+    move_text = ""
+    if move_info:
+        move_text = f"\nRecent Move (15m): ~{int(move_info['move'])} USDT"
 
     message = f"""
 {title}
 
-TF: {tf}
+TF Trigger: {tf}
 🕒 {time_str()}
+
+{htf_text}
+Direction: {bias}
 
 Entry: {entry:.2f}
 SL: {sl:.2f}
-TP: {tp:.2f}
+{tp_text}
 
 Position Size (1% risk on ${DEFAULT_CAPITAL}): {position_size_btc:.4f} BTC
 Safe Leverage: {safe_lev}x
 Funding Rate: {funding:.4f}%
-Open Interest: {oi:,.0f}
+Open Interest: {oi:,.0f}{move_text}
 
 Confidence: {conf}%
 Grade: {grade_level}
 {warning}
 
-⚠️ تصمیم نهایی با شماست
+⚠️ این یک تحلیل و سناریو است، نه تضمین.
 """
     return {
         "date": today_str(),
@@ -473,8 +511,7 @@ Grade: {grade_level}
 # AUTO SIGNAL LOOP
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
-    HTF = htf_bias()
-    # برای A/B/C همچنان HTF لازم است، برای D-1 نه
+    htf = htf_bias_4h()
     funding, oi = get_funding_and_oi()
     if funding is None or abs(funding) > FUNDING_THRESHOLD:
         return
@@ -482,25 +519,36 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     logs = load_json(SIGNAL_LOG_FILE, [])
     strong_logs = load_json(STRONG_MOVE_LOG_FILE, [])
 
-    for tf in ["15m", "30m", "1h"]:
-        c = get_klines(tf)
-        if not c:
-            continue
-
-        # ---------- گرید D-1 (حرکت ≥ 1000 دلار، بدون ساختار) ----------
-        d1_info = detect_d1_move(c, threshold=D1_MOVE_THRESHOLD, window=5)
+    # ---------- D-1 تحلیلی (مولتی‌تایم‌فریم، تریگر 15m) ----------
+    c_15m = get_klines("15m")
+    if c_15m:
+        d1_info = detect_d1_move(c_15m, threshold=D1_MOVE_THRESHOLD, window=5)
         if d1_info:
-            grade_level = "D"
             bias = d1_info["bias"]
-            rsi = calculate_rsi(c)
+            rsi = calculate_rsi(c_15m)
             rsi_conf = (
                 10 if (bias == "LONG" and rsi > 55) or (bias == "SHORT" and rsi < 45)
                 else 5 if (bias == "LONG" and rsi > 45) or (bias == "SHORT" and rsi < 55)
                 else 0
             )
+            atr_15 = calculate_atr(c_15m)
+            last_close = c_15m[-1]["close"]
+            sr_target = find_nearest_sr_1h(last_close, bias)
 
-            if can_send_grade(grade_level):
-                sig = build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf)
+            if can_send_grade("D"):
+                sig = build_signal(
+                    c_15m,
+                    tf="15m",
+                    funding=funding,
+                    oi=oi,
+                    bias=bias,
+                    grade_level="D",
+                    rsi_conf=rsi_conf,
+                    htf_bias=htf,
+                    sr_target=sr_target,
+                    atr=atr_15,
+                    move_info=d1_info
+                )
                 if sig:
                     logs.append({
                         "date": sig["date"], "grade": sig["grade"], "tf": sig["tf"],
@@ -513,12 +561,17 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                     for rid in receivers:
                         await context.bot.send_message(chat_id=rid, text=sig["message"])
 
-        # ---------- A/B/C (ساختاری، مثل قبل) ----------
-        if HTF is None:
+    # ---------- A/B/C ساختاری (مثل قبل، روی 15m/30m/1h) ----------
+    if not htf:
+        return
+
+    for tf in ["15m", "30m", "1h"]:
+        c = get_klines(tf)
+        if not c:
             continue
 
         bias = early_bias(c)
-        if not bias or bias != HTF:
+        if not bias or bias != htf:
             continue
 
         rsi = calculate_rsi(c)
@@ -579,7 +632,19 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         if not can_send_grade(grade_level):
             continue
 
-        sig = build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf)
+        sig = build_signal(
+            c,
+            tf=tf,
+            funding=funding,
+            oi=oi,
+            bias=bias,
+            grade_level=grade_level,
+            rsi_conf=rsi_conf,
+            htf_bias=htf,
+            sr_target=None,
+            atr=None,
+            move_info=None
+        )
         if not sig:
             continue
 
@@ -615,7 +680,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.4
+📊 DAILY SUMMARY – BTC NDS PRO V7.5
 
 Date: {today}
 
@@ -643,7 +708,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = sum(1 for x in today_signals if x.get("grade") == "C")
     d = sum(1 for x in today_signals if x.get("grade") == "D")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.4 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V7.5 (Manual)
 
 Date: {today}
 
@@ -663,7 +728,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V7.4\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V7.5\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
@@ -812,7 +877,7 @@ async def backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     max_drawdown = 12 if a_trades > 10 else 18
 
     await update.message.reply_text(f"""
-📈 بک‌تست پیشرفته (از logهای بات + simulate):
+📈 بک‌تست تقریبی (بر اساس لاگ سیگنال‌ها):
 
 تعداد کل ترید: {total_trades}
 • A: {a_trades}
@@ -824,7 +889,7 @@ Win Rate تقریبی: {win_rate:.1f}%
 Profit Factor تقریبی: {profit_factor}
 Max Drawdown تقریبی: {max_drawdown}%
 
-(برای دقت بیشتر، بک‌تست واقعی روی داده‌های تاریخی انجام بده)
+(برای دقت واقعی، بک‌تست روی داده‌های تاریخی لازم است)
 """)
 
 # =========================
@@ -862,6 +927,6 @@ def main():
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({"time": time_str(), "version": "V7.4"})
+    restarts.append({"time": time_str(), "version": "V7.5"})
     save_json(RESTART_LOG_FILE, restarts[-50:])
     main()
