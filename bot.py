@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG - V7.5 (MULTI-TF, ANALYTIC D-1)
+# CONFIG - V7.6 (MULTI-TF + D-1 DEBUG)
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -40,13 +40,9 @@ STRENGTH_THRESHOLD_B = 0.45
 STRENGTH_THRESHOLD_C = 0.35
 STRENGTH_THRESHOLD_D = 0.25
 
-# حرکت خیلی قوی بدون ورود (برای هشدار A/B/C)
 STRONG_MOVE_USD = 200
-
-# آستانهٔ حرکت برای گرید تحلیلی D-1
 D1_MOVE_THRESHOLD = 1000  # دلار
 
-# محدودیت اختصاصی گریدها
 MAX_C_SIGNALS_PER_DAY = 6
 MAX_D_SIGNALS_PER_DAY = 8
 
@@ -358,13 +354,11 @@ def find_nearest_sr_1h(current_price, direction):
     lows = [x["low"] for x in c]
 
     if direction == "LONG":
-        # نزدیک‌ترین مقاومت بالای قیمت فعلی
         candidates = [h for h in highs if h > current_price]
         if not candidates:
             return None
         return min(candidates, key=lambda x: x - current_price)
     else:
-        # نزدیک‌ترین حمایت زیر قیمت فعلی
         candidates = [l for l in lows if l < current_price]
         if not candidates:
             return None
@@ -408,11 +402,9 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf,
                  htf_bias=None, sr_target=None, atr=None, move_info=None):
     last_close = c[-1]["close"]
 
-    # ATR برای 15m (برای D-1 مهم است)
     if atr is None:
         atr = calculate_atr(c)
 
-    # هدف بر اساس مولتی‌تایم‌فریم (حالت C)
     if sr_target:
         primary_target = sr_target
     else:
@@ -421,7 +413,6 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf,
         else:
             primary_target = last_close - 3 * atr
 
-    # هدف دوم اگر حرکت خیلی قوی باشد
     secondary_target = None
     if move_info and move_info.get("move", 0) >= 1500:
         if bias == "LONG":
@@ -431,21 +422,20 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf,
 
     entry = last_close
 
-    # SL ساده بر اساس ATR
     if bias == "LONG":
         sl = entry - 1.5 * atr
         tp = primary_target
-        title = "🟢 BTC LONG – NDS PRO V7.5"
+        title = "🟢 BTC LONG – NDS PRO V7.6"
         safe_lev = SAFE_LEVERAGE_LONG
     else:
         sl = entry + 1.5 * atr
         tp = primary_target
-        title = "🔴 BTC SHORT – NDS PRO V7.5"
+        title = "🔴 BTC SHORT – NDS PRO V7.6"
         safe_lev = SAFE_LEVERAGE_SHORT
 
     potential = abs(tp - entry)
     if potential < MIN_PROFIT_USD:
-        return None
+        return None, "POTENTIAL_TOO_LOW"
 
     risk_usd = DEFAULT_CAPITAL * RISK_PERCENT
     position_size_btc = risk_usd / abs(entry - sl) if abs(entry - sl) > 0 else 0
@@ -505,7 +495,7 @@ Grade: {grade_level}
         "tp": tp,
         "sl": sl,
         "message": message
-    }
+    }, None
 
 # =========================
 # AUTO SIGNAL LOOP
@@ -519,7 +509,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     logs = load_json(SIGNAL_LOG_FILE, [])
     strong_logs = load_json(STRONG_MOVE_LOG_FILE, [])
 
-    # ---------- D-1 تحلیلی (مولتی‌تایم‌فریم، تریگر 15m) ----------
+    # ---------- D-1 تحلیلی + DEBUG (15m) ----------
     c_15m = get_klines("15m")
     if c_15m:
         d1_info = detect_d1_move(c_15m, threshold=D1_MOVE_THRESHOLD, window=5)
@@ -535,8 +525,14 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             last_close = c_15m[-1]["close"]
             sr_target = find_nearest_sr_1h(last_close, bias)
 
-            if can_send_grade("D"):
-                sig = build_signal(
+            debug_reason = None
+            debug_extra = {}
+
+            if not can_send_grade("D"):
+                debug_reason = "GRADE_LIMIT"
+                debug_extra["grade"] = "D"
+            else:
+                sig, reason = build_signal(
                     c_15m,
                     tf="15m",
                     funding=funding,
@@ -560,8 +556,31 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                         receivers.add(ADMIN_ID)
                     for rid in receivers:
                         await context.bot.send_message(chat_id=rid, text=sig["message"])
+                else:
+                    debug_reason = reason or "UNKNOWN_BUILD_FAIL"
 
-    # ---------- A/B/C ساختاری (مثل قبل، روی 15m/30m/1h) ----------
+            # اگر حرکت ۱۰۰۰ دلاری بود ولی سیگنال ساخته نشد → DEBUG فقط برای ADMIN
+            if debug_reason and ADMIN_ID:
+                move_val = int(d1_info.get("move", 0))
+                sr_txt = f"{sr_target:.2f}" if sr_target else "None"
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"""⚠️ DEBUG – D-1 FAILED (V7.6)
+
+Move (15m window): ~{move_val} USDT
+Bias: {bias}
+HTF Bias (4h): {htf or 'None'}
+ATR(15m): {atr_15:.2f}
+SR Target (1h): {sr_txt}
+
+Reason: {debug_reason}
+Extra: {json.dumps(debug_extra, ensure_ascii=False)}
+
+🕒 {time_str()}
+"""
+                )
+
+    # ---------- A/B/C ساختاری (مثل قبل) ----------
     if not htf:
         return
 
@@ -584,7 +603,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
         grade_level = None
 
-        # A – خیلی سخت‌گیر
         if (
             displacement(c, bias, "A") and
             liquidity_sweep(c, bias, "A") and
@@ -595,8 +613,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             rsi_conf > 0
         ):
             grade_level = "A"
-
-        # B – سخت‌گیر ولی آزادتر
         elif (
             displacement(c, bias, "B") and
             liquidity_sweep(c, bias, "B") and
@@ -606,8 +622,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             adx_value > 20
         ):
             grade_level = "B"
-
-        # C – متوسط
         elif (
             displacement(c, bias, "C") and
             liquidity_sweep(c, bias, "C") and
@@ -632,7 +646,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         if not can_send_grade(grade_level):
             continue
 
-        sig = build_signal(
+        sig, _ = build_signal(
             c,
             tf=tf,
             funding=funding,
@@ -680,7 +694,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.5
+📊 DAILY SUMMARY – BTC NDS PRO V7.6
 
 Date: {today}
 
@@ -708,7 +722,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = sum(1 for x in today_signals if x.get("grade") == "C")
     d = sum(1 for x in today_signals if x.get("grade") == "D")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.5 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V7.6 (Manual)
 
 Date: {today}
 
@@ -728,7 +742,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V7.5\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V7.6\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
@@ -927,6 +941,6 @@ def main():
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({"time": time_str(), "version": "V7.5"})
+    restarts.append({"time": time_str(), "version": "V7.6"})
     save_json(RESTART_LOG_FILE, restarts[-50:])
     main()
