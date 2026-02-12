@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG - V7.6 (MULTI-TF + D-1 DEBUG)
+# CONFIG - V7.7 (MULTI-TF MOVE + D-1 DEBUG)
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -41,7 +41,13 @@ STRENGTH_THRESHOLD_C = 0.35
 STRENGTH_THRESHOLD_D = 0.25
 
 STRONG_MOVE_USD = 200
-D1_MOVE_THRESHOLD = 1000  # دلار
+
+# آستانه‌های حرکت برای D-1 در تایم‌فریم‌های مختلف
+D1_THRESHOLDS = {
+    "15m": 1000,
+    "30m": 1500,
+    "1h": 2000
+}
 
 MAX_C_SIGNALS_PER_DAY = 6
 MAX_D_SIGNALS_PER_DAY = 8
@@ -365,23 +371,31 @@ def find_nearest_sr_1h(current_price, direction):
         return max(candidates, key=lambda x: current_price - x)
 
 # =========================
-# D-1 MOVE DETECTION (15m)
+# D-1 MOVE DETECTION (MULTI-TF)
 # =========================
-def detect_d1_move(c, threshold=D1_MOVE_THRESHOLD, window=5):
-    if len(c) < window + 1:
-        return None
-    recent = c[-window:]
-    highs = [x["high"] for x in recent]
-    lows = [x["low"] for x in recent]
-    max_high = max(highs)
-    min_low = min(lows)
-    move = max_high - min_low
-    if move >= threshold:
-        first_open = recent[0]["open"]
-        last_close = recent[-1]["close"]
-        bias = "LONG" if last_close > first_open else "SHORT"
-        return {"move": move, "bias": bias}
-    return None
+def detect_d1_move_multi():
+    results = []
+    for tf, threshold in D1_THRESHOLDS.items():
+        c = get_klines(tf)
+        if not c or len(c) < 6:
+            continue
+        window = 5
+        recent = c[-window:]
+        highs = [x["high"] for x in recent]
+        lows = [x["low"] for x in recent]
+        max_high = max(highs)
+        min_low = min(lows)
+        move = max_high - min_low
+        if move >= threshold:
+            first_open = recent[0]["open"]
+            last_close = recent[-1]["close"]
+            bias = "LONG" if last_close > first_open else "SHORT"
+            results.append({
+                "tf": tf,
+                "move": move,
+                "bias": bias
+            })
+    return results  # ممکن است خالی باشد یا چند مورد داشته باشد
 
 # =========================
 # SIGNAL CORE
@@ -425,12 +439,12 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf,
     if bias == "LONG":
         sl = entry - 1.5 * atr
         tp = primary_target
-        title = "🟢 BTC LONG – NDS PRO V7.6"
+        title = "🟢 BTC LONG – NDS PRO V7.7"
         safe_lev = SAFE_LEVERAGE_LONG
     else:
         sl = entry + 1.5 * atr
         tp = primary_target
-        title = "🔴 BTC SHORT – NDS PRO V7.6"
+        title = "🔴 BTC SHORT – NDS PRO V7.7"
         safe_lev = SAFE_LEVERAGE_SHORT
 
     potential = abs(tp - entry)
@@ -460,7 +474,7 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf,
 
     move_text = ""
     if move_info:
-        move_text = f"\nRecent Move (15m): ~{int(move_info['move'])} USDT"
+        move_text = f"\nRecent Move ({move_info.get('tf')} window): ~{int(move_info['move'])} USDT"
 
     message = f"""
 {title}
@@ -509,32 +523,36 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     logs = load_json(SIGNAL_LOG_FILE, [])
     strong_logs = load_json(STRONG_MOVE_LOG_FILE, [])
 
-    # ---------- D-1 تحلیلی + DEBUG (15m) ----------
-    c_15m = get_klines("15m")
-    if c_15m:
-        d1_info = detect_d1_move(c_15m, threshold=D1_MOVE_THRESHOLD, window=5)
-        if d1_info:
-            bias = d1_info["bias"]
-            rsi = calculate_rsi(c_15m)
+    # ---------- D-1 تحلیلی + DEBUG (مولتی‌تایم‌فریم حرکت) ----------
+    d1_moves = detect_d1_move_multi()
+    if d1_moves:
+        for move_info in d1_moves:
+            tf_move = move_info["tf"]
+            c_tf = get_klines(tf_move)
+            if not c_tf:
+                continue
+
+            bias = move_info["bias"]
+            rsi = calculate_rsi(c_tf)
             rsi_conf = (
                 10 if (bias == "LONG" and rsi > 55) or (bias == "SHORT" and rsi < 45)
                 else 5 if (bias == "LONG" and rsi > 45) or (bias == "SHORT" and rsi < 55)
                 else 0
             )
-            atr_15 = calculate_atr(c_15m)
-            last_close = c_15m[-1]["close"]
+            atr_tf = calculate_atr(c_tf)
+            last_close = c_tf[-1]["close"]
             sr_target = find_nearest_sr_1h(last_close, bias)
 
             debug_reason = None
-            debug_extra = {}
+            debug_extra = {"tf_move": tf_move}
 
             if not can_send_grade("D"):
                 debug_reason = "GRADE_LIMIT"
                 debug_extra["grade"] = "D"
             else:
                 sig, reason = build_signal(
-                    c_15m,
-                    tf="15m",
+                    c_tf,
+                    tf=tf_move,
                     funding=funding,
                     oi=oi,
                     bias=bias,
@@ -542,8 +560,8 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                     rsi_conf=rsi_conf,
                     htf_bias=htf,
                     sr_target=sr_target,
-                    atr=atr_15,
-                    move_info=d1_info
+                    atr=atr_tf,
+                    move_info=move_info
                 )
                 if sig:
                     logs.append({
@@ -559,18 +577,18 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                 else:
                     debug_reason = reason or "UNKNOWN_BUILD_FAIL"
 
-            # اگر حرکت ۱۰۰۰ دلاری بود ولی سیگنال ساخته نشد → DEBUG فقط برای ADMIN
+            # اگر حرکت بزرگ دیده شد ولی سیگنال ساخته نشد → DEBUG فقط برای ADMIN
             if debug_reason and ADMIN_ID:
-                move_val = int(d1_info.get("move", 0))
+                move_val = int(move_info.get("move", 0))
                 sr_txt = f"{sr_target:.2f}" if sr_target else "None"
                 await context.bot.send_message(
                     chat_id=ADMIN_ID,
-                    text=f"""⚠️ DEBUG – D-1 FAILED (V7.6)
+                    text=f"""⚠️ DEBUG – D-1 FAILED (V7.7)
 
-Move (15m window): ~{move_val} USDT
+Move ({tf_move} window): ~{move_val} USDT
 Bias: {bias}
 HTF Bias (4h): {htf or 'None'}
-ATR(15m): {atr_15:.2f}
+ATR({tf_move}): {atr_tf:.2f}
 SR Target (1h): {sr_txt}
 
 Reason: {debug_reason}
@@ -694,7 +712,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.6
+📊 DAILY SUMMARY – BTC NDS PRO V7.7
 
 Date: {today}
 
@@ -722,7 +740,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = sum(1 for x in today_signals if x.get("grade") == "C")
     d = sum(1 for x in today_signals if x.get("grade") == "D")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.6 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V7.7 (Manual)
 
 Date: {today}
 
@@ -742,7 +760,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V7.6\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V7.7\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
@@ -941,6 +959,6 @@ def main():
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({"time": time_str(), "version": "V7.6"})
+    restarts.append({"time": time_str(), "version": "V7.7"})
     save_json(RESTART_LOG_FILE, restarts[-50:])
     main()
