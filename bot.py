@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG - V7.7 (MULTI-TF MOVE + D-1 DEBUG)
+# CONFIG - V7.8 (MULTI-TF MOVE + D-1 DEBUG + MONITORING)
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -63,6 +63,9 @@ LIMIT_FILE = "limit_state.json"
 
 VIP_USERS = set()
 ADMIN_ID = None
+
+# مانیتورینگ اجرای auto_signal
+LAST_SIGNAL_RUN = None
 
 # =========================
 # TIME (IRAN)
@@ -439,12 +442,12 @@ def build_signal(c, tf, funding, oi, bias, grade_level, rsi_conf,
     if bias == "LONG":
         sl = entry - 1.5 * atr
         tp = primary_target
-        title = "🟢 BTC LONG – NDS PRO V7.7"
+        title = "🟢 BTC LONG – NDS PRO V7.8"
         safe_lev = SAFE_LEVERAGE_LONG
     else:
         sl = entry + 1.5 * atr
         tp = primary_target
-        title = "🔴 BTC SHORT – NDS PRO V7.7"
+        title = "🔴 BTC SHORT – NDS PRO V7.8"
         safe_lev = SAFE_LEVERAGE_SHORT
 
     potential = abs(tp - entry)
@@ -515,6 +518,9 @@ Grade: {grade_level}
 # AUTO SIGNAL LOOP
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
+    global LAST_SIGNAL_RUN
+    LAST_SIGNAL_RUN = iran_time()
+
     htf = htf_bias_4h()
     funding, oi = get_funding_and_oi()
     if funding is None or abs(funding) > FUNDING_THRESHOLD:
@@ -583,7 +589,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                 sr_txt = f"{sr_target:.2f}" if sr_target else "None"
                 await context.bot.send_message(
                     chat_id=ADMIN_ID,
-                    text=f"""⚠️ DEBUG – D-1 FAILED (V7.7)
+                    text=f"""⚠️ DEBUG – D-1 FAILED (V7.8)
 
 Move ({tf_move} window): ~{move_val} USDT
 Bias: {bias}
@@ -712,7 +718,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.7
+📊 DAILY SUMMARY – BTC NDS PRO V7.8
 
 Date: {today}
 
@@ -740,7 +746,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = sum(1 for x in today_signals if x.get("grade") == "C")
     d = sum(1 for x in today_signals if x.get("grade") == "D")
     await update.message.reply_text(f"""
-📊 DAILY SUMMARY – BTC NDS PRO V7.7 (Manual)
+📊 DAILY SUMMARY – BTC NDS PRO V7.8 (Manual)
 
 Date: {today}
 
@@ -760,7 +766,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🟢 BOT ALIVE – NDS PRO V7.7\n🕒 {time_str()}\nStatus: Running"
+            text=f"🟢 BOT ALIVE – NDS PRO V7.8\n🕒 {time_str()}\nStatus: Running"
         )
 
 # =========================
@@ -923,6 +929,85 @@ Max Drawdown تقریبی: {max_drawdown}%
 
 (برای دقت واقعی، بک‌تست روی داده‌های تاریخی لازم است)
 """)
+# =========================
+# HEALTH & MONITOR
+# =========================
+async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ فقط ادمین")
+        return
+
+    now = iran_time()
+    status_parts = []
+
+    # وضعیت auto_signal
+    if LAST_SIGNAL_RUN:
+        diff = (now - LAST_SIGNAL_RUN).seconds
+        if diff > 360:
+            status_parts.append(f"auto_signal DELAYED ({diff} sec)")
+        else:
+            status_parts.append(f"auto_signal OK (last {diff} sec ago)")
+    else:
+        status_parts.append("auto_signal NEVER RUN")
+
+    # وضعیت Webhook
+    try:
+        info = await context.bot.get_webhook_info()
+        if info.url:
+            status_parts.append(f"Webhook OK ({info.url})")
+        else:
+            status_parts.append("Webhook DOWN (no url)")
+    except Exception:
+        status_parts.append("Webhook CHECK ERROR")
+
+    await update.message.reply_text(
+        "Health – NDS PRO V7.8\n"
+        + "\n".join(f"- {p}" for p in status_parts)
+        + f"\n\n🕒 {time_str()}"
+    )
+
+async def monitor_signal(context: ContextTypes.DEFAULT_TYPE):
+    global LAST_SIGNAL_RUN
+    now = iran_time()
+
+    # اگر هنوز auto_signal اجرا نشده
+    if not LAST_SIGNAL_RUN:
+        return
+
+    diff = (now - LAST_SIGNAL_RUN).seconds
+
+    # اگر بیش از ۶ دقیقه اجرا نشده
+    if diff > 360 and ADMIN_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"⚠️ WARNING – auto_signal not running ({diff} sec delay)\n🕒 {time_str()}"
+            )
+        except Exception:
+            pass
+
+    # چک و تعمیر Webhook
+    try:
+        info = await context.bot.get_webhook_info()
+        if not info.url:
+            # تلاش برای تعمیر Webhook
+            await context.bot.set_webhook(url=WEBHOOK_URL + WEBHOOK_PATH)
+            if ADMIN_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"⚠️ Webhook was DOWN — repaired automatically (V7.8).\n🕒 {time_str()}"
+                )
+    except Exception:
+        # اگر چک Webhook هم خطا داد، یک بار دیگر تلاش به ثبت
+        try:
+            await context.bot.set_webhook(url=WEBHOOK_URL + WEBHOOK_PATH)
+            if ADMIN_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"⚠️ Webhook check FAILED — tried to repair (V7.8).\n🕒 {time_str()}"
+                )
+        except Exception:
+            pass
 
 # =========================
 # MAIN
@@ -943,9 +1028,12 @@ def main():
     app.add_handler(CommandHandler("ath", ath))
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("backtest", backtest))
+    app.add_handler(CommandHandler("health", health))
 
+    # Jobs
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
+    app.job_queue.run_repeating(monitor_signal, interval=120, first=120)
 
     daily_time_utc = dtime(hour=17, minute=0)
     app.job_queue.run_daily(daily_summary, time=daily_time_utc)
@@ -959,6 +1047,6 @@ def main():
 
 if __name__ == "__main__":
     restarts = load_json(RESTART_LOG_FILE, [])
-    restarts.append({"time": time_str(), "version": "V7.7"})
+    restarts.append({"time": time_str(), "version": "V7.8"})
     save_json(RESTART_LOG_FILE, restarts[-50:])
     main()
