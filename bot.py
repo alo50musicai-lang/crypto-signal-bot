@@ -1008,6 +1008,18 @@ async def monitor_signal(context: ContextTypes.DEFAULT_TYPE):
                 )
         except Exception:
             pass
+# =========================
+# AUTO SIGNAL TEST (ADMIN ONLY)
+# =========================
+async def auto_signal_test(context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🧪 TEST – auto_signal loop is running\n🕒 {time_str()}"
+            )
+        except:
+            pass
 
 # =========================
 # MAIN
@@ -1034,6 +1046,7 @@ def main():
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
     app.job_queue.run_repeating(monitor_signal, interval=120, first=120)
+    app.job_queue.run_repeating(auto_signal_test, interval=30, first=5)
 
     daily_time_utc = dtime(hour=17, minute=0)
     app.job_queue.run_daily(daily_summary, time=daily_time_utc)
