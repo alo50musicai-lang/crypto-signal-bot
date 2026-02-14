@@ -697,6 +697,40 @@ Extra: {json.dumps(debug_extra, ensure_ascii=False)}
             receivers.add(ADMIN_ID)
         for rid in receivers:
             await context.bot.send_message(chat_id=rid, text=sig["message"])
+# =========================
+# FAKE D-1 TEST (ADMIN ONLY)
+# =========================
+async def test_d1_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else None
+
+    # فقط ادمین اجازه داره این تست رو اجرا کنه
+    if not ADMIN_ID or user_id != ADMIN_ID:
+        return
+
+    symbol = "BTCUSDT"
+    direction = "LONG"
+    grade = "D-1 (TEST)"
+    tf = "15m"
+    entry = "68000"
+    sl = "67400"
+    tp1 = "68600"
+    tp2 = "69200"
+
+    text = (
+        f"🧪 TEST SIGNAL – {grade}\n"
+        f"📌 {symbol} | {direction}\n"
+        f"⏱ Timeframe: {tf}\n\n"
+        f"💰 Entry: {entry}\n"
+        f"🛡 SL: {sl}\n"
+        f"🎯 TP1: {tp1}\n"
+        f"🎯 TP2: {tp2}\n\n"
+        f"⚠️ این فقط یک تست برای ADMIN است."
+    )
+
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=text)
+    except Exception:
+        pass
 
 # =========================
 # DAILY SUMMARY
@@ -1029,13 +1063,14 @@ def main():
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("backtest", backtest))
     app.add_handler(CommandHandler("health", health))
+    app.add_handler(CommandHandler("test_d1", test_d1_admin))
 
     # Jobs
     app.job_queue.run_repeating(auto_signal, interval=180, first=30)
     app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
     app.job_queue.run_repeating(monitor_signal, interval=120, first=120)
     
-
+    
     daily_time_utc = dtime(hour=17, minute=0)
     app.job_queue.run_daily(daily_summary, time=daily_time_utc)
 
