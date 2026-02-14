@@ -28,25 +28,25 @@ VOLUME_MULTIPLIER = 0.9
 ATR_PERIOD = 14
 ADX_PERIOD = 14
 
-FUNDING_THRESHOLD = 0.003
+FUNDING_THRESHOLD = 0.005
 
 DEFAULT_CAPITAL = 10000
 RISK_PERCENT = 0.01
 SAFE_LEVERAGE_LONG = 5
 SAFE_LEVERAGE_SHORT = 3
 
-STRENGTH_THRESHOLD_A = 0.55
-STRENGTH_THRESHOLD_B = 0.45
-STRENGTH_THRESHOLD_C = 0.35
-STRENGTH_THRESHOLD_D = 0.25
+STRENGTH_THRESHOLD_A = 0.50
+STRENGTH_THRESHOLD_B = 0.40
+STRENGTH_THRESHOLD_C = 0.30
+STRENGTH_THRESHOLD_D = 0.20
 
 STRONG_MOVE_USD = 200
 
 # آستانه‌های حرکت برای D-1 در تایم‌فریم‌های مختلف
 D1_THRESHOLDS = {
-    "15m": 1000,
-    "30m": 1500,
-    "1h": 2000
+    "15m": 600,
+    "30m": 900,
+    "1h": 1200
 }
 
 MAX_C_SIGNALS_PER_DAY = 6
@@ -207,7 +207,7 @@ def volume_filter(c, grade_level="A"):
     if not vols:
         return False
     avg_vol = sum(vols) / len(vols)
-    multiplier = 0.85 if grade_level in ["C", "D"] else 1.0 if grade_level == "B" else VOLUME_MULTIPLIER
+    multiplier = 0.80 if grade_level in ["C", "D"] else 1.0 if grade_level == "B" else VOLUME_MULTIPLIER
     return c[-1]["volume"] > avg_vol * multiplier
 
 def calculate_atr(c, period=ATR_PERIOD):
@@ -633,7 +633,7 @@ Extra: {json.dumps(debug_extra, ensure_ascii=False)}
             compression(c, "A") and
             detect_fvg(c, bias, "A") and
             volume_filter(c, "A") and
-            adx_value > 25 and
+            adx_value > 20 and
             rsi_conf > 0
         ):
             grade_level = "A"
@@ -643,7 +643,7 @@ Extra: {json.dumps(debug_extra, ensure_ascii=False)}
             compression(c, "B") and
             detect_fvg(c, bias, "B") and
             volume_filter(c, "B") and
-            adx_value > 20
+            adx_value > 15
         ):
             grade_level = "B"
         elif (
@@ -651,7 +651,7 @@ Extra: {json.dumps(debug_extra, ensure_ascii=False)}
             liquidity_sweep(c, bias, "C") and
             compression(c, "C") and
             detect_fvg(c, bias, "C") and
-            adx_value > 12
+            adx_value > 10
         ):
             grade_level = "C"
 
