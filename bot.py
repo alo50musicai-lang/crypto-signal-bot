@@ -701,9 +701,12 @@ Win Rate تقریبی: {win_rate:.1f}%
 
 
 # =========================
-# APP + WEBHOOK + MAIN
+# MAIN
 # =========================
-def build_app():
+def main():
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN env var is missing")
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -711,46 +714,32 @@ def build_app():
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(CommandHandler("viplist", viplist))
     app.add_handler(CommandHandler("id", show_id))
-
     app.add_handler(CommandHandler("price", price))
     app.add_handler(CommandHandler("high", high))
     app.add_handler(CommandHandler("ath", ath))
-
     app.add_handler(CommandHandler("summary", summary))
-    app.add_handler(CommandHandler("test_d1", test_d1_admin))
     app.add_handler(CommandHandler("backtest", backtest))
+    app.add_handler(CommandHandler("health", health))
+    app.add_handler(CommandHandler("test_d1", test_d1_admin))
 
-    # Auto-signal هر ۳ دقیقه
-    app.job_queue.run_repeating(auto_signal, interval=180, first=20)
+    # Jobs
+    app.job_queue.run_repeating(auto_signal, interval=180, first=30)
+    app.job_queue.run_repeating(heartbeat, interval=10800, first=60)
+    app.job_queue.run_repeating(monitor_signal, interval=120, first=120)
+    
+    daily_time_utc = dtime(hour=17, minute=0)
+    app.job_queue.run_daily(daily_summary, time=daily_time_utc)
 
-    # Daily summary هر روز ساعت 23:59
-    app.job_queue.run_daily(daily_summary, time=dtime(23, 59))
-
-    # Heartbeat هر 6 ساعت
-    app.job_queue.run_repeating(heartbeat, interval=21600, first=10)
-
-    return app
-
-
-async def main():
-    app = build_app()
-
-    if WEBHOOK_URL:
-        full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
-        await app.initialize()
-        await app.start()
-        await app.bot.set_webhook(full_url)
-        await app.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.getenv("PORT", 8000)),
-            url_path=WEBHOOK_PATH.lstrip("/")
-        )
-    else:
-        await app.initialize()
-        await app.start()
-        await app.run_polling()
-
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 10000)),
+        url_path=WEBHOOK_PATH,
+        webhook_url=WEBHOOK_URL + WEBHOOK_PATH
+    )
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    restarts = load_json(RESTART_LOG_FILE, [])
+    restarts.append({"time": time_str(), "version": "V7.8"})
+    save_json(RESTART_LOG_FILE, restarts[-50:])
+    main()
+
