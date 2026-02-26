@@ -577,28 +577,39 @@ TP2: {tp2:.2f}
 """
 
 # =========================
-# AUTO SIGNAL – SIMPLE MODE (FIXED ATR)
+# AUTO SIGNAL – STRATEGY B (BALANCED)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     global LAST_SIGNAL_RUN
     LAST_SIGNAL_RUN = iran_time()
 
-    c = get_klines("15m", limit=20)
-    if not c or len(c) < 5:
+    c = get_klines("15m", limit=60)
+    if not c or len(c) < 20:
         return
 
     last = c[-1]["close"]
     prev = c[-2]["close"]
 
-    # جهت ساده
-    direction = "LONG" if last > prev else "SHORT"
+    # پیدا کردن Swing High / Low
+    swing_high = max(x["high"] for x in c[-10:-2])
+    swing_low = min(x["low"] for x in c[-10:-2])
+
+    direction = None
+
+    # Breakout ساده و واقعی
+    if last > swing_high:
+        direction = "LONG"
+        ref = swing_high
+    elif last < swing_low:
+        direction = "SHORT"
+        ref = swing_low
+    else:
+        return  # اگر شکست واقعی نبود → سیگنال نده
 
     # ATR
     atr = calculate_atr(c)
-
-    # جلوگیری از ATR صفر
-    if atr < 10:
-        atr = 10
+    if atr < 15:
+        atr = 15  # جلوگیری از ATR صفر
 
     entry = last
 
@@ -612,11 +623,12 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         tp2 = entry - 2.0 * atr
 
     msg = f"""
-📡 BTC SIGNAL – SIMPLE MODE (V7.9 FIXED)
+📡 BTC SIGNAL – STRATEGY B (Balanced V7.9)
 
 Direction: {direction}
 TF: 15m
 
+Break Level: {ref:.2f}
 Entry: {entry:.2f}
 SL: {sl:.2f}
 TP1: {tp1:.2f}
@@ -626,6 +638,7 @@ ATR Used: {atr:.2f}
 🕒 {time_str()}
 """
 
+    # ذخیره در لاگ
     logs = load_json(SIGNAL_LOG_FILE, [])
     logs.append({
         "date": today_str(),
@@ -647,6 +660,7 @@ ATR Used: {atr:.2f}
             await context.bot.send_message(chat_id=rid, text=msg)
         except:
             pass
+
 
 
 
