@@ -577,27 +577,29 @@ TP2: {tp2:.2f}
 """
 
 # =========================
-# AUTO SIGNAL – ALWAYS ACTIVE (VERY SIMPLE STRATEGY)
+# AUTO SIGNAL – SIMPLE MODE (FIXED ATR)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     global LAST_SIGNAL_RUN
     LAST_SIGNAL_RUN = iran_time()
 
-    c = get_klines("15m", limit=5)
-    if not c or len(c) < 2:
+    c = get_klines("15m", limit=20)
+    if not c or len(c) < 5:
         return
 
     last = c[-1]["close"]
     prev = c[-2]["close"]
 
     # جهت ساده
-    if last > prev:
-        direction = "LONG"
-    else:
-        direction = "SHORT"
+    direction = "LONG" if last > prev else "SHORT"
 
-    # ATR برای SL/TP
+    # ATR
     atr = calculate_atr(c)
+
+    # جلوگیری از ATR صفر
+    if atr < 10:
+        atr = 10
+
     entry = last
 
     if direction == "LONG":
@@ -610,7 +612,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         tp2 = entry - 2.0 * atr
 
     msg = f"""
-📡 BTC SIGNAL – SIMPLE MODE (V7.9)
+📡 BTC SIGNAL – SIMPLE MODE (V7.9 FIXED)
 
 Direction: {direction}
 TF: 15m
@@ -620,10 +622,10 @@ SL: {sl:.2f}
 TP1: {tp1:.2f}
 TP2: {tp2:.2f}
 
+ATR Used: {atr:.2f}
 🕒 {time_str()}
 """
 
-    # ذخیره در لاگ
     logs = load_json(SIGNAL_LOG_FILE, [])
     logs.append({
         "date": today_str(),
@@ -636,7 +638,6 @@ TP2: {tp2:.2f}
     })
     save_json(SIGNAL_LOG_FILE, logs[-1000:])
 
-    # ارسال به VIP + ADMIN
     receivers = set(VIP_USERS)
     if ADMIN_ID:
         receivers.add(ADMIN_ID)
@@ -646,6 +647,7 @@ TP2: {tp2:.2f}
             await context.bot.send_message(chat_id=rid, text=msg)
         except:
             pass
+
 
 
 # =========================
