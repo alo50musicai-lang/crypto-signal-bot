@@ -577,37 +577,66 @@ TP2: {tp2:.2f}
 """
 
 # =========================
-# AUTO SIGNAL (STRATEGY B)
+# AUTO SIGNAL – ALWAYS ACTIVE (VERY SIMPLE STRATEGY)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     global LAST_SIGNAL_RUN
     LAST_SIGNAL_RUN = iran_time()
 
-    funding, oi = get_funding_and_oi()
-    if funding is None or abs(funding) > FUNDING_THRESHOLD:
+    c = get_klines("15m", limit=5)
+    if not c or len(c) < 2:
         return
 
-    sig = pa_breakout_signal()
-    if not sig:
-        return
+    last = c[-1]["close"]
+    prev = c[-2]["close"]
 
-    if not can_send_grade("D"):
-        return
+    # جهت ساده
+    if last > prev:
+        direction = "LONG"
+    else:
+        direction = "SHORT"
 
-    msg = build_pa_message(sig)
+    # ATR برای SL/TP
+    atr = calculate_atr(c)
+    entry = last
 
+    if direction == "LONG":
+        sl = entry - 1.5 * atr
+        tp1 = entry + 1.2 * atr
+        tp2 = entry + 2.0 * atr
+    else:
+        sl = entry + 1.5 * atr
+        tp1 = entry - 1.2 * atr
+        tp2 = entry - 2.0 * atr
+
+    msg = f"""
+📡 BTC SIGNAL – SIMPLE MODE (V7.9)
+
+Direction: {direction}
+TF: 15m
+
+Entry: {entry:.2f}
+SL: {sl:.2f}
+TP1: {tp1:.2f}
+TP2: {tp2:.2f}
+
+🕒 {time_str()}
+"""
+
+    # ذخیره در لاگ
     logs = load_json(SIGNAL_LOG_FILE, [])
     logs.append({
         "date": today_str(),
         "grade": "D",
         "tf": "15m",
-        "bias": sig["dir"],
-        "entry": sig["ref"],
+        "bias": direction,
+        "entry": entry,
         "tp": None,
         "sl": None
     })
     save_json(SIGNAL_LOG_FILE, logs[-1000:])
 
+    # ارسال به VIP + ADMIN
     receivers = set(VIP_USERS)
     if ADMIN_ID:
         receivers.add(ADMIN_ID)
@@ -615,8 +644,9 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     for rid in receivers:
         try:
             await context.bot.send_message(chat_id=rid, text=msg)
-        except Exception:
+        except:
             pass
+
 
 # =========================
 # FAKE D-1 TEST (ADMIN ONLY)
