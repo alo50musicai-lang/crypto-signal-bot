@@ -577,7 +577,7 @@ TP2: {tp2:.2f}
 """
 
 # =========================
-# AUTO SIGNAL – STRATEGY B (BALANCED)
+# AUTO SIGNAL – STRATEGY B (1000 USD FILTER)
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     global LAST_SIGNAL_RUN
@@ -588,28 +588,28 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         return
 
     last = c[-1]["close"]
-    prev = c[-2]["close"]
 
-    # پیدا کردن Swing High / Low
+    # پیدا کردن Swing High / Low ساده
     swing_high = max(x["high"] for x in c[-10:-2])
     swing_low = min(x["low"] for x in c[-10:-2])
 
     direction = None
+    ref = None
 
-    # Breakout ساده و واقعی
-    if last > swing_high:
+    # Breakout با شرط حرکت حداقل 1000 دلار
+    if last > swing_high and (last - swing_high) >= 1000:
         direction = "LONG"
         ref = swing_high
-    elif last < swing_low:
+    elif last < swing_low and (swing_low - last) >= 1000:
         direction = "SHORT"
         ref = swing_low
     else:
-        return  # اگر شکست واقعی نبود → سیگنال نده
+        return  # اگر حرکت کمتر از 1000 دلار بود → سیگنال نده
 
     # ATR
     atr = calculate_atr(c)
     if atr < 15:
-        atr = 15  # جلوگیری از ATR صفر
+        atr = 15
 
     entry = last
 
@@ -623,7 +623,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         tp2 = entry - 2.0 * atr
 
     msg = f"""
-📡 BTC SIGNAL – STRATEGY B (Balanced V7.9)
+📡 BTC SIGNAL – STRATEGY B (V7.9)
 
 Direction: {direction}
 TF: 15m
@@ -634,11 +634,11 @@ SL: {sl:.2f}
 TP1: {tp1:.2f}
 TP2: {tp2:.2f}
 
+Move Size: {abs(entry - ref):.2f} USDT
 ATR Used: {atr:.2f}
 🕒 {time_str()}
 """
 
-    # ذخیره در لاگ
     logs = load_json(SIGNAL_LOG_FILE, [])
     logs.append({
         "date": today_str(),
@@ -660,6 +660,7 @@ ATR Used: {atr:.2f}
             await context.bot.send_message(chat_id=rid, text=msg)
         except:
             pass
+
 
 
 
